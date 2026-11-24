@@ -1,0 +1,32 @@
+description: 预测：用户二元组、接续表、字符搭配模型、末字续字四档联想
+id: pime-predict-context
+version: 1.1.0
+abi: { major: 1, minor: 0 }
+min_core: "1.0.0"
+state_schema: 1
+store_schema: 1
+runtime: wasm
+role: predict
+platforms: [windows-x64, windows-arm64, macos-x64, macos-arm64,
+            linux-x64, linux-arm64, android-arm64, android-x64, ios-arm64, ios-x64, harmony-arm64, harmony-x64]
+entry: pime_process
+capabilities: [surrounding.read, workspace, asset.read]
+requires: []
+assets: [continuation.tsv, collocations.tsv]
+limits:
+  memory_mb: 8
+  instructions: 600000
+  time_ms: 5
+  state_kb: 8
+  workspace_kb: 32
+  candidates_max: 12
+  scratch_bytes: 16384
+  max_frame_bytes: 65536
+budget: { sync_us: 60, async_ms: 20 }
+settings:
+  - { key: max_candidates, type: int, default: 5, min: 1, max: 12 }
+  - { key: user_bigram, type: bool, default: true }
+  - { key: continuation, type: bool, default: true }
+  - { key: collocation, type: bool, default: true }
+  - { key: fallback, type: bool, default: true }
+  - { key: show_command, type: bool, default: true }

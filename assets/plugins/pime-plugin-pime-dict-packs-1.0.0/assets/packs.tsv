@@ -1,0 +1,15 @@
+# 专业词库包：<id>\t<名称>\t<默认启用 1/0>
+medical	医学	0
+legal	法律	0
+finance	金融	0
+it	信息技术	1
+chemistry	化学	0
+biology	生物	0
+math	数学	0
+physics	物理	0
+geography	地理	0
+history	历史	0
+literature	文学	0
+engineering	工程	0
+agriculture	农业	0
+military	军事	0

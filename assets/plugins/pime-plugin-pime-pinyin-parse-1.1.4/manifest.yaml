@@ -1,0 +1,29 @@
+description: 全拼解析：音节切分、自动纠错、触点邻键纠正与预编辑
+id: pime-pinyin-parse
+version: 1.1.4
+abi: { major: 1, minor: 0 }
+min_core: "1.0.0"
+state_schema: 1
+store_schema: 1
+runtime: wasm
+role: parse
+platforms: [windows-x64, windows-arm64, macos-x64, macos-arm64,
+            linux-x64, linux-arm64, android-arm64, android-x64, ios-arm64, ios-x64, harmony-arm64, harmony-x64]
+entry: pime_process
+capabilities: [input.read, workspace, output.emit]
+requires: []
+limits:
+  memory_mb: 16
+  instructions: 5000000
+  time_ms: 5
+  state_kb: 64
+  workspace_kb: 128
+  candidates_max: 20
+  scratch_bytes: 16384
+  max_frame_bytes: 65536
+budget: { sync_us: 50, async_ms: 20 }
+settings:
+  - { key: fuzzy, type: bool, default: true }
+  - { key: max_syllables, type: int, default: 8, min: 1, max: 16 }
+  - { key: auto_correct, type: bool, default: true }
+  - { key: tap_correct, type: bool, default: true }

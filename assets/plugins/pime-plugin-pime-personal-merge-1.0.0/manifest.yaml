@@ -1,0 +1,28 @@
+description: 服务：个人资料跨设备合并（Lamport 版本）
+id: pime-personal-merge
+version: 1.0.0
+abi: { major: 1, minor: 0 }
+min_core: "1.0.0"
+state_schema: 1
+store_schema: 1
+runtime: wasm
+role: service
+platforms: [windows-x64, windows-arm64, macos-x64, macos-arm64,
+            linux-x64, linux-arm64, android-arm64, android-x64, ios-arm64, ios-x64, harmony-arm64, harmony-x64]
+entry: pime_process
+capabilities: [store.kv, workspace]
+requires: []
+limits:
+  memory_mb: 8
+  instructions: 400000
+  time_ms: 5
+  state_kb: 8
+  workspace_kb: 16
+  store_mb: 8
+  candidates_max: 8
+  scratch_bytes: 16384
+  max_frame_bytes: 65536
+budget: { sync_us: 50, async_ms: 20 }
+settings:
+  - { key: enabled, type: bool, default: true }
+  - { key: max_entries, type: int, default: 32, min: 1, max: 64 }

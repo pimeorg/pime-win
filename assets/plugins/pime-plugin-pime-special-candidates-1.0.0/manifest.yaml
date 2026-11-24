@@ -1,0 +1,29 @@
+description: 特殊候选：v 数字/算式、日期时间星期、正文算式直接出结果
+id: pime-special-candidates
+version: 1.0.0
+abi: { major: 1, minor: 0 }
+min_core: "1.0.0"
+state_schema: 1
+store_schema: 1
+runtime: wasm
+role: translate
+platforms: [windows-x64, windows-arm64, macos-x64, macos-arm64,
+            linux-x64, linux-arm64, android-arm64, android-x64, ios-arm64, ios-x64, harmony-arm64, harmony-x64]
+entry: pime_process
+capabilities: [workspace, surrounding.read, output.emit]
+requires: [pime-pinyin-parse@^1.0]
+limits:
+  memory_mb: 8
+  instructions: 2000000
+  time_ms: 5
+  state_kb: 8
+  workspace_kb: 64
+  candidates_max: 32
+  scratch_bytes: 16384
+  max_frame_bytes: 65536
+budget: { sync_us: 80, async_ms: 20 }
+settings:
+  - { key: enabled, type: bool, default: true }
+  - { key: v_mode, type: bool, default: true }
+  - { key: date, type: bool, default: true }
+  - { key: max_candidates, type: int, default: 8, min: 1, max: 32 }

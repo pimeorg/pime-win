@@ -1,0 +1,4 @@
+LIBRARY pime_tsf
+EXPORTS
+    DllGetClassObject
+    DllCanUnloadNow

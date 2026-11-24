@@ -1,0 +1,4 @@
+# 模型目录：<id>\t<engine>\t<path>\t<声明哈希>\t<默认启用 1/0>
+handwriting	ncnn	handwriting.ncnn	sha256:unfetched	1
+speech	ncnn	speech.ncnn	sha256:unfetched	1
+lm	ncnn	lm.ncnn	sha256:unfetched	0

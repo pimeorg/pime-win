@@ -1,0 +1,28 @@
+description: 预测：按上下文末词联想表情
+id: pime-emoji-suggest
+version: 1.0.0
+abi: { major: 1, minor: 0 }
+min_core: "1.0.0"
+state_schema: 1
+store_schema: 1
+runtime: wasm
+role: predict
+platforms: [windows-x64, windows-arm64, macos-x64, macos-arm64,
+            linux-x64, linux-arm64, android-arm64, android-x64, ios-arm64, ios-x64, harmony-arm64, harmony-x64]
+entry: pime_process
+capabilities: [surrounding.read, asset.read, workspace]
+requires: []
+assets: [emoji.tsv]
+limits:
+  memory_mb: 4
+  instructions: 300000
+  time_ms: 5
+  state_kb: 4
+  workspace_kb: 8
+  candidates_max: 8
+  scratch_bytes: 8192
+  max_frame_bytes: 16384
+budget: { sync_us: 40, async_ms: 20 }
+settings:
+  - { key: enabled, type: bool, default: true }
+  - { key: max_candidates, type: int, default: 3, min: 1, max: 8 }

@@ -1,0 +1,29 @@
+description: 服务：语音/手写/语言模型目录、启停与声明哈希校验
+id: pime-model-manager
+version: 1.0.0
+abi: { major: 1, minor: 0 }
+min_core: "1.0.0"
+state_schema: 1
+store_schema: 1
+runtime: wasm
+role: service
+platforms: [windows-x64, windows-arm64, macos-x64, macos-arm64,
+            linux-x64, linux-arm64, android-arm64, android-x64, ios-arm64, ios-x64, harmony-arm64, harmony-x64]
+entry: pime_process
+capabilities: [asset.read, store.kv, workspace]
+requires: []
+assets: [models.tsv]
+limits:
+  memory_mb: 8
+  instructions: 300000
+  time_ms: 5
+  state_kb: 8
+  workspace_kb: 32
+  store_mb: 1
+  candidates_max: 8
+  scratch_bytes: 8192
+  max_frame_bytes: 32768
+budget: { sync_us: 40, async_ms: 20 }
+settings:
+  - { key: enabled, type: bool, default: true }
+  - { key: disabled, type: string, default: "" }

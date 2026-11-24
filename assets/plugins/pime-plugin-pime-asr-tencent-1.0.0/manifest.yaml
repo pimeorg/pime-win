@@ -1,0 +1,27 @@
+description: 语音识别：腾讯云实时语音识别 V2（WebSocket）
+id: pime-asr-tencent
+version: 1.0.0
+abi: { major: 1, minor: 0 }
+min_core: "1.0.0"
+state_schema: 1
+store_schema: 1
+runtime: lua
+role: recognize
+platforms: [android-arm64, android-x64, windows-x64, macos-arm64, linux-x64]
+entry: plugin.lua
+capabilities: [audio.capture, net.wss, thread, time, random, crypto.*, log]
+limits:
+  memory_mb: 64
+  instructions: 100000000
+  time_ms: 500
+  state_kb: 16
+  workspace_kb: 16
+  scratch_bytes: 32768
+  max_frame_bytes: 262144
+budget: { sync_us: 50000, async_ms: 15000 }
+settings:
+  - { key: app_id, type: string, default: "" }
+  - { key: secret_id, type: string, default: "" }
+  - { key: secret_key, type: secret, default: "" }
+  - { key: engine_model_type, type: string, default: "16k_zh_en_2.0" }
+  - { key: hotword_list, type: string, default: "" }

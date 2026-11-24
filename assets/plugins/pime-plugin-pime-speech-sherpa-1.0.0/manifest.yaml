@@ -1,0 +1,30 @@
+description: 语音识别：WeaveText 同款 sherpa-onnx 离线识别（流式模型，边说边出字）
+id: pime-speech-sherpa
+version: 1.0.0
+abi: { major: 1, minor: 0 }
+min_core: "1.0.0"
+state_schema: 1
+store_schema: 1
+runtime: native
+trusted: true
+role: recognize
+platforms: [android-arm64, android-x64, windows-x64]
+entry: pime_process
+capabilities: [audio.capture, audio.pcm, asset.read, log]
+limits:
+  memory_mb: 64
+  instructions: 5000000
+  time_ms: 200
+  state_kb: 64
+  workspace_kb: 64
+  candidates_max: 8
+  scratch_bytes: 16384
+  max_frame_bytes: 262144
+budget: { sync_us: 2000, async_ms: 120000 }
+settings:
+  - { key: runtime_dir, type: string, default: "" }
+  - { key: model_dir, type: string, default: "" }
+  - { key: threads, type: int, default: 2, min: 1, max: 8 }
+  - { key: sample_rate, type: int, default: 16000, min: 8000, max: 48000 }
+  # Developer/test hook: replay a 16 kHz mono wav instead of the microphone.
+  - { key: wav_file, type: string, default: "" }

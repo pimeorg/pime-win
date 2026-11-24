@@ -1,0 +1,27 @@
+# 快捷短语：<码>\t<文本>
+# 文本里可用 {date} {time} {weekday} {iso} 模板，提交时展开。
+dz	地址
+dh	电话
+sjh	手机号
+yx	邮箱
+wx	微信
+qq	QQ
+sfz	身份证
+gs	公司
+dw	单位
+dzhi	地址
+dizhi	地址
+youxiang	邮箱
+shoujihao	手机号
+shenfenzheng	身份证
+rq	{date}
+rqi	{date}
+sj	{time}
+shijian	{time}
+xq	{weekday}
+jt	{weekday}
+iso	{iso}
+jintian	{date}
+xianzai	{time}
+gongsi	公司
+danwei	单位

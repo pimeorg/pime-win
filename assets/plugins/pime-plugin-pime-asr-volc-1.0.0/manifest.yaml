@@ -1,0 +1,27 @@
+description: 语音识别：火山引擎 bigmodel_async 在线流式识别
+id: pime-asr-volc
+version: 1.0.0
+abi: { major: 1, minor: 0 }
+min_core: "1.0.0"
+state_schema: 1
+store_schema: 1
+runtime: lua
+role: recognize
+platforms: [android-arm64, android-x64, windows-x64, macos-arm64, linux-x64]
+entry: plugin.lua
+capabilities: [audio.capture, net.wss, thread, compress.gzip, time, random, log]
+limits:
+  memory_mb: 64
+  instructions: 100000000
+  time_ms: 500
+  state_kb: 16
+  workspace_kb: 16
+  scratch_bytes: 32768
+  max_frame_bytes: 262144
+budget: { sync_us: 50000, async_ms: 15000 }
+settings:
+  - { key: api_key, type: secret, default: "" }
+  - { key: app_key, type: string, default: "" }
+  - { key: access_key, type: secret, default: "" }
+  - { key: resource_id, type: string, default: "volc.seedasr.sauc.duration" }
+  - { key: endpoint, type: string, default: "" }

@@ -1,0 +1,31 @@
+description: 用户学习：追加日志、衰减、近期选择、退格撤销、连续造词、用户二元组
+id: pime-learn-user-dict
+version: 1.0.0
+abi: { major: 1, minor: 0 }
+min_core: "1.0.0"
+state_schema: 1
+store_schema: 1
+runtime: wasm
+role: learn
+platforms: [windows-x64, windows-arm64, macos-x64, macos-arm64,
+            linux-x64, linux-arm64, android-arm64, android-x64, ios-arm64, ios-x64, harmony-arm64, harmony-x64]
+entry: pime_process
+capabilities: [store.kv, workspace, time]
+requires: []
+limits:
+  memory_mb: 8
+  instructions: 400000
+  time_ms: 5
+  state_kb: 32
+  workspace_kb: 32
+  store_mb: 4
+  candidates_max: 16
+  scratch_bytes: 16384
+  max_frame_bytes: 65536
+budget: { sync_us: 60, async_ms: 20 }
+settings:
+  - { key: enabled, type: bool, default: true }
+  - { key: decay_days, type: int, default: 30, min: 0, max: 3650 }
+  - { key: undo_window_ms, type: int, default: 10000, min: 100, max: 60000 }
+  - { key: max_candidates, type: int, default: 8, min: 1, max: 16 }
+  - { key: max_recent, type: int, default: 8, min: 1, max: 8 }

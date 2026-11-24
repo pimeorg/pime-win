@@ -1,0 +1,26 @@
+description: 解析：识别 u 拆字前缀与反引号字形筛选前缀
+id: pime-shape-parse
+version: 1.0.0
+abi: { major: 1, minor: 0 }
+min_core: "1.0.0"
+state_schema: 1
+store_schema: 1
+runtime: wasm
+role: parse
+platforms: [windows-x64, windows-arm64, macos-x64, macos-arm64,
+            linux-x64, linux-arm64, android-arm64, android-x64, ios-arm64, ios-x64, harmony-arm64, harmony-x64]
+entry: pime_process
+capabilities: [workspace]
+requires: []
+limits:
+  memory_mb: 4
+  instructions: 100000
+  time_ms: 5
+  state_kb: 4
+  workspace_kb: 8
+  candidates_max: 4
+  scratch_bytes: 4096
+  max_frame_bytes: 8192
+budget: { sync_us: 20, async_ms: 20 }
+settings:
+  - { key: enabled, type: bool, default: true }

@@ -1,0 +1,30 @@
+description: 学习：按应用记忆中/英输入模式
+id: pime-app-mode
+version: 1.0.0
+abi: { major: 1, minor: 0 }
+min_core: "1.0.0"
+state_schema: 1
+store_schema: 1
+runtime: wasm
+role: learn
+platforms: [windows-x64, windows-arm64, macos-x64, macos-arm64,
+            linux-x64, linux-arm64, android-arm64, android-x64, ios-arm64, ios-x64, harmony-arm64, harmony-x64]
+entry: pime_process
+capabilities: [context.read, store.kv, workspace]
+requires: []
+limits:
+  memory_mb: 4
+  instructions: 200000
+  time_ms: 5
+  state_kb: 4
+  workspace_kb: 8
+  store_mb: 1
+  candidates_max: 4
+  scratch_bytes: 4096
+  max_frame_bytes: 16384
+budget: { sync_us: 30, async_ms: 20 }
+settings:
+  - { key: enabled, type: bool, default: true }
+  - { key: remember, type: bool, default: true }
+  - { key: observe, type: bool, default: true }
+  - { key: default_mode, type: enum, values: [zh, en], default: zh }

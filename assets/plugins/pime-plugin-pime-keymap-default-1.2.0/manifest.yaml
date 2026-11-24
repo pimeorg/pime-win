@@ -1,0 +1,28 @@
+description: 默认键位：把控制键映射为链内动作，文本键放行
+id: pime-keymap-default
+version: 1.2.0
+abi: { major: 1, minor: 0 }
+min_core: "1.0.0"
+state_schema: 1
+store_schema: 1
+runtime: wasm
+role: preprocess
+platforms: [windows-x64, windows-arm64, macos-x64, macos-arm64,
+            linux-x64, linux-arm64, android-arm64, android-x64, ios-arm64, ios-x64, harmony-arm64, harmony-x64]
+entry: pime_process
+capabilities: [input.read, workspace]
+requires: []
+limits:
+  memory_mb: 8
+  instructions: 2000000
+  time_ms: 5
+  state_kb: 32
+  workspace_kb: 64
+  candidates_max: 20
+  scratch_bytes: 16384
+  max_frame_bytes: 65536
+budget: { sync_us: 50, async_ms: 20 }
+settings:
+  - { key: space_selects_candidate, type: bool, default: true }
+  - { key: candidate_keys, type: bool, default: true }
+  - { key: number_selects_candidate, type: bool, default: true }

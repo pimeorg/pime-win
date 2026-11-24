@@ -1,0 +1,26 @@
+description: 英文：累积字母与撇号，保留原码大小写
+id: pime-english-parse
+version: 1.0.1
+abi: { major: 1, minor: 0 }
+min_core: "1.0.0"
+state_schema: 1
+store_schema: 1
+runtime: wasm
+role: parse
+platforms: [windows-x64, windows-arm64, macos-x64, macos-arm64,
+            linux-x64, linux-arm64, android-arm64, android-x64, ios-arm64, ios-x64, harmony-arm64, harmony-x64]
+entry: pime_process
+capabilities: [input.read, workspace]
+requires: []
+limits:
+  memory_mb: 8
+  instructions: 1000000
+  time_ms: 5
+  state_kb: 32
+  workspace_kb: 64
+  candidates_max: 32
+  scratch_bytes: 16384
+  max_frame_bytes: 65536
+budget: { sync_us: 30, async_ms: 20 }
+settings:
+  - { key: max_code, type: int, default: 32, min: 1, max: 64 }
