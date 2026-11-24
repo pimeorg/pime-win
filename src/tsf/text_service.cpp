@@ -3,8 +3,10 @@
 // the layered candidate window.
 #include "tsf/text_service.h"
 
+#include <ctffunc.h>
 #include <msctf.h>
 #include <oleauto.h>
+#include <olectl.h>
 #include <pime/hal.h>
 #include <wrl/client.h>
 
@@ -22,6 +24,7 @@
 #include "engine/core_engine.h"
 #include "tsf/display_attr.h"
 #include "tsf/guids.h"
+#include "tsf/resource.h"
 #include "ui/candidate_window.h"
 
 using Microsoft::WRL::ComPtr;
@@ -32,6 +35,7 @@ namespace {
 // Bit 4 (HOST_CANDIDATES): the host renders the candidate strip itself.
 constexpr uint32_t kHostCaps = 1u << 4;
 constexpr wchar_t kNotifyClassName[] = L"PimeNotifyWindow";
+constexpr DWORD kLangBarSinkCookie = 0x50494D45;  // 'PIME'
 
 class TextServiceImpl;
 
@@ -99,6 +103,8 @@ class TextServiceImpl final : public ITfTextInputProcessorEx,
                               public ITfKeyEventSink,
                               public ITfCompositionSink,
                               public ITfDisplayAttributeProvider,
+                              public ITfLangBarItemButton,
+                              public ITfSource,
                               public CandidateWindow::Delegate {
 public:
     TextServiceImpl() = default;
@@ -121,6 +127,11 @@ public:
             *ppv = static_cast<ITfCompositionSink*>(this);
         } else if (IsEqualIID(riid, IID_ITfDisplayAttributeProvider)) {
             *ppv = static_cast<ITfDisplayAttributeProvider*>(this);
+        } else if (IsEqualIID(riid, IID_ITfLangBarItem) ||
+                   IsEqualIID(riid, IID_ITfLangBarItemButton)) {
+            *ppv = static_cast<ITfLangBarItemButton*>(this);
+        } else if (IsEqualIID(riid, IID_ITfSource)) {
+            *ppv = static_cast<ITfSource*>(this);
         }
         if (!*ppv) return E_NOINTERFACE;
         AddRef();
@@ -197,6 +208,18 @@ public:
                 WINEVENT_OUTOFCONTEXT);
         }
 
+        // Windows 8+ shows the 中/英 mode of the focused text service in the
+        // taskbar input indicator, but only for the item whose GUID is
+        // GUID_LBI_INPUTMODE.
+        ComPtr<ITfLangBarItemMgr> langbar;
+        if (SUCCEEDED(thread_mgr_.As(&langbar)) &&
+            SUCCEEDED(langbar->AddItem(static_cast<ITfLangBarItemButton*>(this)))) {
+            langbar_mgr_ = langbar;
+        } else {
+            WriteLog(LogLevel::Warn, "tsf",
+                     "language bar item unavailable");
+        }
+
         ComPtr<ITfDocumentMgr> focused;
         if (SUCCEEDED(thread_mgr_->GetFocus(&focused)) && focused) {
             OnSetFocus(focused.Get(), nullptr);
@@ -233,11 +256,106 @@ public:
                 thread_focus_cookie_ = 0;
             }
         }
+        if (langbar_mgr_) {
+            langbar_mgr_->RemoveItem(static_cast<ITfLangBarItemButton*>(this));
+            langbar_mgr_.Reset();
+        }
+        langbar_sink_.Reset();
         thread_mgr_.Reset();
         client_id_ = TF_CLIENTID_NULL;
         shift_down_ = shift_used_ = false;
         WriteLog(LogLevel::Info, "tsf", "deactivated");
         return S_OK;
+    }
+
+    // ---- ITfLangBarItemButton -------------------------------------------
+    // The language bar reaches the item through ITfSource: it advises an
+    // ITfLangBarItemSink here and we push OnUpdate through it when the mode
+    // changes. The taskbar input indicator displays whichever item reports
+    // GUID_LBI_INPUTMODE, so on Windows 8+ this is also the 中/英 button next
+    // to the tray.
+    STDMETHODIMP GetInfo(TF_LANGBARITEMINFO* info) override {
+        if (!info) return E_INVALIDARG;
+        *info = TF_LANGBARITEMINFO{};
+        info->clsidService = kClsidTextService;
+        info->guidItem = GUID_LBI_INPUTMODE;
+        info->dwStyle = TF_LBI_STYLE_BTN_BUTTON;
+        info->ulSort = 0;
+        lstrcpynW(info->szDescription, L"PIME 输入模式", TF_LBI_DESC_MAXLEN);
+        return S_OK;
+    }
+    STDMETHODIMP GetStatus(DWORD* status) override {
+        if (!status) return E_INVALIDARG;
+        *status = 0;
+        return S_OK;
+    }
+    STDMETHODIMP GetTooltipString(BSTR* text) override {
+        if (!text) return E_INVALIDARG;
+        *text = SysAllocString(chinese_ ? L"PIME 中文输入" : L"PIME 英文输入");
+        return *text ? S_OK : E_OUTOFMEMORY;
+    }
+    STDMETHODIMP Show(BOOL show) override {
+        (void)show;
+        return S_OK;
+    }
+    STDMETHODIMP GetText(BSTR* text) override {
+        if (!text) return E_INVALIDARG;
+        *text = SysAllocString(chinese_ ? L"中" : L"英");
+        return *text ? S_OK : E_OUTOFMEMORY;
+    }
+    STDMETHODIMP GetIcon(HICON* icon) override {
+        if (!icon) return E_INVALIDARG;
+        HMODULE module = nullptr;
+        GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                               GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                           reinterpret_cast<LPCWSTR>(&CreatePimeTextService),
+                           &module);
+        // The language bar destroys the icon it receives, so this must be a
+        // fresh load rather than LR_SHARED.
+        *icon = static_cast<HICON>(LoadImageW(
+            module, MAKEINTRESOURCEW(chinese_ ? IDI_MODE_ZH : IDI_MODE_EN),
+            IMAGE_ICON, GetSystemMetrics(SM_CXSMICON),
+            GetSystemMetrics(SM_CYSMICON), 0));
+        return *icon ? S_OK : E_FAIL;
+    }
+    STDMETHODIMP OnClick(TfLBIClick click, POINT point,
+                         const RECT* area) override {
+        (void)point;
+        (void)area;
+        if (click == TF_LBI_CLK_LEFT) ToggleChinese();
+        return S_OK;
+    }
+    STDMETHODIMP InitMenu(ITfMenu*) override { return E_NOTIMPL; }
+    STDMETHODIMP OnMenuSelect(UINT) override { return E_NOTIMPL; }
+
+    // ---- ITfSource (language bar sink connection) -----------------------
+    STDMETHODIMP AdviseSink(REFIID riid, IUnknown* unknown,
+                            DWORD* cookie) override {
+        if (!cookie) return E_INVALIDARG;
+        if (!IsEqualIID(riid, IID_ITfLangBarItemSink))
+            return CONNECT_E_CANNOTCONNECT;
+        if (langbar_sink_) return CONNECT_E_ADVISELIMIT;
+        if (!unknown ||
+            FAILED(unknown->QueryInterface(
+                IID_ITfLangBarItemSink,
+                reinterpret_cast<void**>(langbar_sink_.GetAddressOf())))) {
+            return E_NOINTERFACE;
+        }
+        *cookie = kLangBarSinkCookie;
+        return S_OK;
+    }
+    STDMETHODIMP UnadviseSink(DWORD cookie) override {
+        if (cookie != kLangBarSinkCookie || !langbar_sink_)
+            return CONNECT_E_NOCONNECTION;
+        langbar_sink_.Reset();
+        return S_OK;
+    }
+
+    void UpdateLangBar() {
+        if (langbar_sink_) {
+            langbar_sink_->OnUpdate(TF_LBI_ICON | TF_LBI_TEXT |
+                                    TF_LBI_TOOLTIP);
+        }
     }
 
     // ---- host window minimize --------------------------------------------
@@ -603,6 +721,7 @@ private:
         app_ = ProcessImageName();
         // Modern IMEs remember the Chinese/English state per application.
         chinese_ = LoadAppMode(app_, settings_.chinese != 0);
+        UpdateLangBar();
         session_ = CoreEngine::Instance().OpenSession(
             notify_hwnd_, app_, PIME_FIELD_TEXT, kHostCaps, settings_.page_size);
         if (session_) {
@@ -934,6 +1053,7 @@ private:
         }
         window_.SetDark(theme_dark_);
         window_.ShowModeBadge(chinese_, caret);
+        UpdateLangBar();
     }
 
     void OnWake() {
@@ -968,11 +1088,14 @@ private:
                 StartSession();
             }
         }
+        UpdateLangBar();
     }
 
     LONG ref_ = 1;
     ComPtr<ITfThreadMgr> thread_mgr_;
     ComPtr<ITfKeystrokeMgr> keys_;
+    ComPtr<ITfLangBarItemMgr> langbar_mgr_;
+    ComPtr<ITfLangBarItemSink> langbar_sink_;
     TfClientId client_id_ = TF_CLIENTID_NULL;
     DWORD thread_event_cookie_ = 0;
     DWORD thread_focus_cookie_ = 0;

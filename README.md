@@ -14,6 +14,8 @@ Windows 平台的拼音输入法：输入法内核直接复用 `pime-core`（WAM
   Tab / Enter / Esc 操作。
 - 中英文状态按应用分别记忆（`HKCU\Software\PIME\AppMode`），新应用默认使用
   设置里的「启动时默认中文」。
+- 任务栏输入指示器显示当前状态的 `中` / `英` 图标（蓝色 / 灰色）；点击图标
+  或轻按 Shift 都能切换，图标随状态即时刷新。
 - 组合文本带蓝色点状下划线；中文模式下标点默认转全角（`，。？！；：` 等），
   设置里可改为英文半角（`,.?!`）；输入中按标点会先上屏候选词再输入标点。
 - 安装器把输入法注册为 zh-CN 的键盘 TIP，并自动加入系统输入法列表。
@@ -94,6 +96,12 @@ build\dist\pime.exe --uninstall
   用 Direct2D/DirectWrite 绘制，下拉菜单画在窗口内并处理悬停、点击与
   Tab/Enter/Esc 键盘操作。主题设置只影响候选窗口与气泡，设置窗口本身跟随
   系统深浅色。
+- 任务栏的中/英图标是一个 TSF 语言栏项：`GetInfo` 返回
+  `GUID_LBI_INPUTMODE`（Windows 8+ 的输入指示器只显示这一项），语言栏通过
+  `ITfSource::AdviseSink` 挂上 `ITfLangBarItemSink`，切换模式后调用
+  `OnUpdate(TF_LBI_ICON | TF_LBI_TEXT | TF_LBI_TOOLTIP)` 让它重取图标。
+  `GetIcon` 每次从 `pime_tsf.dll` 资源重新 `LoadImage`，不能返回 `LR_SHARED`
+  句柄：语言栏会 `DestroyIcon` 释放收到的图标。
 - 组合文本的显示属性通过 `GUID_PROP_ATTRIBUTE` 设置，值是
   `ITfCategoryMgr::RegisterGUID` 返回的 atom（`VT_I4`），不是属性对象本身。
 - 插件链在空格/回车/鼠标选词时会自行清空拼音缓冲，但数字键选词不会；

@@ -79,6 +79,7 @@ target_link_libraries(pime_host PUBLIC pime_core
 add_library(pime_tsf SHARED
     src/tsf/dllmain.cpp
     src/tsf/pime_tsf.def
+    src/tsf/pime_tsf.rc
     src/tsf/register.cpp
     src/tsf/text_service.cpp
     src/tsf/display_attr.cpp

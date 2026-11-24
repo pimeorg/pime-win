@@ -1,0 +1,34 @@
+#include "resource.h"
+#include <windows.h>
+
+IDI_MODE_ZH ICON "mode_zh.ico"
+IDI_MODE_EN ICON "mode_en.ico"
+
+VS_VERSION_INFO VERSIONINFO
+    FILEVERSION 1, 0, 0, 0
+    PRODUCTVERSION 1, 0, 0, 0
+    FILEFLAGSMASK 0x3fL
+    FILEFLAGS 0x0L
+    FILEOS VOS_NT_WINDOWS32
+    FILETYPE VFT_DLL
+    FILESUBTYPE VFT2_UNKNOWN
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "080404B0"
+        BEGIN
+            VALUE "CompanyName", "pime contributors"
+            VALUE "FileDescription", "PIME Text Service"
+            VALUE "FileVersion", "1.0.0"
+            VALUE "InternalName", "pime_tsf"
+            VALUE "LegalCopyright", "Copyright (C) 2026 pime contributors"
+            VALUE "OriginalFilename", "pime_tsf.dll"
+            VALUE "ProductName", "PIME Pinyin Input Method"
+            VALUE "ProductVersion", "1.0.0"
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x0804, 1200
+    END
+END
