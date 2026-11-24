@@ -4,6 +4,7 @@
 #include "tsf/text_service.h"
 
 #include <msctf.h>
+#include <oleauto.h>
 #include <pime/hal.h>
 #include <wrl/client.h>
 
@@ -188,6 +189,13 @@ public:
         WriteLog(LogLevel::Info, "tsf",
                  window_.Create(this) ? "candidate window created"
                                       : "candidate window create failed");
+        minimize_owner_ = this;
+        if (!minimize_hook_) {
+            minimize_hook_ = SetWinEventHook(
+                EVENT_SYSTEM_MINIMIZESTART, EVENT_SYSTEM_MINIMIZESTART, nullptr,
+                &TextServiceImpl::MinimizeEventProc, 0, GetCurrentThreadId(),
+                WINEVENT_OUTOFCONTEXT);
+        }
 
         ComPtr<ITfDocumentMgr> focused;
         if (SUCCEEDED(thread_mgr_->GetFocus(&focused)) && focused) {
@@ -199,6 +207,11 @@ public:
     STDMETHODIMP Deactivate() override {
         if (!thread_mgr_) return S_OK;
         LeaveDocument();
+        if (minimize_hook_) {
+            UnhookWinEvent(minimize_hook_);
+            minimize_hook_ = nullptr;
+        }
+        if (minimize_owner_ == this) minimize_owner_ = nullptr;
         window_.Destroy();
         if (notify_hwnd_) {
             DestroyWindow(notify_hwnd_);
@@ -225,6 +238,24 @@ public:
         shift_down_ = shift_used_ = false;
         WriteLog(LogLevel::Info, "tsf", "deactivated");
         return S_OK;
+    }
+
+    // ---- host window minimize --------------------------------------------
+    static void CALLBACK MinimizeEventProc(HWINEVENTHOOK, DWORD event, HWND,
+                                           LONG, LONG, DWORD, DWORD) {
+        if (event != EVENT_SYSTEM_MINIMIZESTART) return;
+        // Minimizing does not move TSF focus, so no KillFocus arrives; without
+        // this the topmost candidate strip keeps floating over other windows.
+        if (minimize_owner_) minimize_owner_->OnHostMinimized();
+    }
+
+    void OnHostMinimized() {
+        // Only hide the strip: cancelling the composition needs an edit
+        // session the host can refuse while the window is being minimized.
+        candidates_.clear();
+        candidates_visible_ = false;
+        page_ = 0;
+        window_.Hide();
     }
 
     // ---- ITfThreadMgrEventSink ------------------------------------------
@@ -297,6 +328,41 @@ public:
         }
         if (shift_down_) shift_used_ = true;
         if (!ShouldClaim(vkey, lparam) || !session_) return S_OK;
+
+        // Chinese punctuation: a mark typed while composing commits the
+        // selected candidate first, then goes in full width; while idle it is
+        // inserted directly. v-mode expressions ("v1.5") keep their ASCII
+        // operators and single quotes stay syllable separators ("xi'an").
+        const std::string ascii = KeyText(vkey, lparam);
+        const std::wstring punctuation =
+            composition_text_.empty() && ascii == "'" ? L"’"
+                                                      : ChinesePunctuation(ascii);
+        const bool v_mode =
+            !composition_text_.empty() &&
+            (composition_text_[0] == L'v' || composition_text_[0] == L'V');
+        const bool v_operator = ascii == "." || ascii == "(" || ascii == ")";
+        if (!punctuation.empty() && !(v_mode && v_operator)) {
+            if (composition_ || candidates_visible_) {
+                KeyEvent space;
+                space.keycode = VK_SPACE;
+                space.action = PIME_KEY_DOWN;
+                ApplyCommands(CoreEngine::Instance().Key(session_, space).commands);
+            }
+            if (composition_ || candidates_visible_) {
+                // The space found nothing to commit; the mark still ends the
+                // preedit, so drop the engine's copy of it.
+                candidates_.clear();
+                candidates_visible_ = false;
+                page_ = 0;
+                window_.Hide();
+                CoreEngine::Instance().Reset(session_);
+            }
+            if (context_) {
+                RequestEdit([&](TfEditCookie ec) { CommitInContext(ec, punctuation); });
+            }
+            *eaten = TRUE;
+            return S_OK;
+        }
 
         KeyEvent event;
         event.keycode = static_cast<uint32_t>(vkey);
@@ -484,6 +550,28 @@ private:
         return ToUtf8(text);
     }
 
+    // Full-width form of the ASCII mark, or empty when the key is not
+    // punctuation. Only single-byte ASCII input can match.
+    static std::wstring ChinesePunctuation(const std::string& text) {
+        if (text.size() != 1) return {};
+        switch (text[0]) {
+            case ',': return L"，";
+            case '.': return L"。";
+            case '?': return L"？";
+            case '!': return L"！";
+            case ';': return L"；";
+            case ':': return L"：";
+            case '\\': return L"、";
+            case '<': return L"《";
+            case '>': return L"》";
+            case '(': return L"（";
+            case ')': return L"）";
+            case '[': return L"【";
+            case ']': return L"】";
+            default: return {};
+        }
+    }
+
     HRESULT RequestEdit(const std::function<void(TfEditCookie)>& body) {
         if (!context_) return E_FAIL;
         auto* session = new (std::nothrow) EditSession(body);
@@ -507,6 +595,8 @@ private:
     void StartSession() {
         if (!engine_ready_ || !context_ || session_) return;
         app_ = ProcessImageName();
+        // Modern IMEs remember the Chinese/English state per application.
+        chinese_ = LoadAppMode(app_, settings_.chinese != 0);
         session_ = CoreEngine::Instance().OpenSession(
             notify_hwnd_, app_, PIME_FIELD_TEXT, kHostCaps, settings_.page_size);
         if (session_) {
@@ -599,6 +689,29 @@ private:
                          "composition SetText failed: " +
                              std::to_string(static_cast<long>(set)));
             }
+            // Preview text is otherwise indistinguishable from committed text
+            // in hosts that only draw the default caret. The property holds a
+            // TfGuidAtom, not the attribute object itself.
+            if (attr_atom_ == 0) {
+                ComPtr<ITfCategoryMgr> categories;
+                if (SUCCEEDED(CoCreateInstance(
+                        CLSID_TF_CategoryMgr, nullptr, CLSCTX_INPROC_SERVER,
+                        IID_PPV_ARGS(categories.GetAddressOf()))) &&
+                    categories) {
+                    categories->RegisterGUID(kGuidDisplayAttribute,
+                                             &attr_atom_);
+                }
+            }
+            ComPtr<ITfProperty> property;
+            if (attr_atom_ != 0 &&
+                SUCCEEDED(context_->GetProperty(
+                    GUID_PROP_ATTRIBUTE, property.GetAddressOf())) &&
+                property) {
+                VARIANT value{};
+                value.vt = VT_I4;
+                value.lVal = static_cast<LONG>(attr_atom_);
+                property->SetValue(ec, composition_range_.Get(), &value);
+            }
         }
         composition_text_ = text;
     }
@@ -609,15 +722,41 @@ private:
                 composition_range_->SetText(
                     ec, 0, text.c_str(), static_cast<LONG>(text.size()));
             }
+            // EndComposition leaves the caret at the composition start in
+            // RichEdit hosts, so the next composition would land before the
+            // text that was just committed. Remember the end and reselect it.
+            ComPtr<ITfRange> caret;
+            if (composition_range_ &&
+                SUCCEEDED(composition_range_->Clone(&caret))) {
+                caret->Collapse(ec, TF_ANCHOR_END);
+            }
             ending_composition_ = true;
             composition_->EndComposition(ec);
             ending_composition_ = false;
+            if (caret && context_) {
+                TF_SELECTION selection{};
+                selection.range = caret.Get();
+                selection.style.ase = TF_AE_NONE;
+                selection.style.fInterimChar = FALSE;
+                context_->SetSelection(ec, 1, &selection);
+            }
         } else if (context_ && !text.empty()) {
+            // RichEdit rejects a null output range even with TF_IAS_NOQUERY,
+            // so ask for the range; it also leaves the selection where it was,
+            // which would put the next character before this one.
             ComPtr<ITfInsertAtSelection> insert;
-            if (SUCCEEDED(context_.As(&insert)) && insert) {
-                insert->InsertTextAtSelection(ec, TF_IAS_NOQUERY, text.c_str(),
-                                              static_cast<LONG>(text.size()),
-                                              nullptr);
+            ComPtr<ITfRange> inserted;
+            if (SUCCEEDED(context_.As(&insert)) && insert &&
+                SUCCEEDED(insert->InsertTextAtSelection(
+                    ec, 0, text.c_str(), static_cast<LONG>(text.size()),
+                    inserted.GetAddressOf())) &&
+                inserted) {
+                inserted->Collapse(ec, TF_ANCHOR_END);
+                TF_SELECTION selection{};
+                selection.range = inserted.Get();
+                selection.style.ase = TF_AE_NONE;
+                selection.style.fInterimChar = FALSE;
+                context_->SetSelection(ec, 1, &selection);
             }
         }
         composition_.Reset();
@@ -716,6 +855,12 @@ private:
             candidates_visible_ = false;
             page_ = 0;
             window_.Hide();
+            // A commit always ends the composition here, but the chain's
+            // parser only drops its buffer on space/enter/candidate commits;
+            // a digit pick leaves the raw pinyin behind and the next letter
+            // would compose on top of it ("zhongguo" + "a"). Reset so the
+            // engine state matches the editor.
+            if (session_) CoreEngine::Instance().Reset(session_);
             return;
         }
         if (hide) {
@@ -748,6 +893,7 @@ private:
         chinese_ = !chinese_;
         settings_.chinese = chinese_ ? 1 : 0;
         SaveSettings(settings_);
+        SaveAppMode(app_, chinese_);
         if (composition_) CancelComposition();
         candidates_.clear();
         candidates_visible_ = false;
@@ -815,6 +961,7 @@ private:
     ComPtr<ITfContext> context_;
     ComPtr<ITfComposition> composition_;
     ComPtr<ITfRange> composition_range_;
+    TfGuidAtom attr_atom_ = 0;
     std::wstring composition_text_;
     bool ending_composition_ = false;
 
@@ -834,7 +981,11 @@ private:
 
     HWND notify_hwnd_ = nullptr;
     UINT config_message_ = 0;
+    HWINEVENTHOOK minimize_hook_ = nullptr;
+    static thread_local TextServiceImpl* minimize_owner_;
 };
+
+thread_local TextServiceImpl* TextServiceImpl::minimize_owner_ = nullptr;
 
 }  // namespace
 

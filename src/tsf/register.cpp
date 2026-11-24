@@ -116,6 +116,10 @@ bool RegisterTextService(const std::wstring& dll_path) {
             categories->RegisterCategory(kClsidTextService, *category,
                                          kClsidTextService);
         }
+        // Display attributes are stored as atoms of their GUID, so the GUID
+        // must be known to the category manager before the TIP can use it.
+        TfGuidAtom attribute_atom = 0;
+        categories->RegisterGUID(kGuidDisplayAttribute, &attribute_atom);
     } else {
         ok = false;
     }
