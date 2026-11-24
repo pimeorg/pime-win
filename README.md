@@ -82,6 +82,8 @@ build\dist\pime-settings.exe --uninstall
   提交后宿主统一 `Reset` 会话，避免下一键在旧拼音上继续组合。
 - 中文标点由 TIP 处理：`v` 开头的数字/表达式模式保留 ASCII 运算符，
   组合中的 `'` 仍作为拼音分隔符（`xi'an`）。
+- 组合期间把选区放在组合区间末尾：RichEdit 默认把光标留在组合起点，
+  光标会停在第一个字母下面，和微软拼音的行为不一致。
 - 注册表：`HKCR\CLSID\{...}\InprocServer32`（Apartment）、CTF 语言配置、
   TSF 分类；输入法列表项通过 `input.dll!InstallLayoutOrTip` 写入，
   卸载时以 `ILOT_UNINSTALL` 标志移除。由于该 API 在刚注册配置的同一进程内

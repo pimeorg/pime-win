@@ -712,6 +712,18 @@ private:
                 value.lVal = static_cast<LONG>(attr_atom_);
                 property->SetValue(ec, composition_range_.Get(), &value);
             }
+            // RichEdit keeps its caret where the composition started, so the
+            // insertion point would blink under the first letter of the
+            // pinyin instead of after the last one.
+            ComPtr<ITfRange> caret;
+            if (SUCCEEDED(composition_range_->Clone(&caret)) && caret &&
+                SUCCEEDED(caret->Collapse(ec, TF_ANCHOR_END))) {
+                TF_SELECTION selection{};
+                selection.range = caret.Get();
+                selection.style.ase = TF_AE_NONE;
+                selection.style.fInterimChar = FALSE;
+                context_->SetSelection(ec, 1, &selection);
+            }
         }
         composition_text_ = text;
     }
