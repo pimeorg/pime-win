@@ -910,7 +910,10 @@ private:
     void ToggleChinese() {
         chinese_ = !chinese_;
         settings_.chinese = chinese_ ? 1 : 0;
-        SaveSettings(settings_);
+        // Persist only the per-app mode. Writing the whole settings blob from
+        // inside the host would, under MSIX registry virtualization, freeze a
+        // private copy of every value in that package, so later changes made
+        // in the settings window would never reach the app.
         SaveAppMode(app_, chinese_);
         if (composition_) CancelComposition();
         candidates_.clear();
