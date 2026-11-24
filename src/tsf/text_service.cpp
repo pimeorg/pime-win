@@ -105,6 +105,7 @@ class TextServiceImpl final : public ITfTextInputProcessorEx,
                               public ITfDisplayAttributeProvider,
                               public ITfLangBarItemButton,
                               public ITfSource,
+                              public ITfCompartmentEventSink,
                               public CandidateWindow::Delegate {
 public:
     TextServiceImpl() = default;
@@ -132,6 +133,8 @@ public:
             *ppv = static_cast<ITfLangBarItemButton*>(this);
         } else if (IsEqualIID(riid, IID_ITfSource)) {
             *ppv = static_cast<ITfSource*>(this);
+        } else if (IsEqualIID(riid, IID_ITfCompartmentEventSink)) {
+            *ppv = static_cast<ITfCompartmentEventSink*>(this);
         }
         if (!*ppv) return E_NOINTERFACE;
         AddRef();
@@ -176,6 +179,24 @@ public:
         settings_ = LoadSettings();
         chinese_ = settings_.chinese != 0;
         theme_dark_ = DarkFor(settings_.theme);
+
+        // Publish the mode through TSF's keyboard open/close compartment so
+        // the input indicator, Ctrl+Space and IME-aware apps see the same
+        // 中/英 state as the engine.
+        ComPtr<ITfCompartmentMgr> compartments;
+        if (SUCCEEDED(thread_mgr_.As(&compartments)) &&
+            SUCCEEDED(compartments->GetCompartment(
+                GUID_COMPARTMENT_KEYBOARD_OPENCLOSE,
+                open_close_.ReleaseAndGetAddressOf()))) {
+            ComPtr<ITfSource> open_close_source;
+            if (SUCCEEDED(open_close_.As(&open_close_source))) {
+                open_close_source->AdviseSink(
+                    IID_ITfCompartmentEventSink,
+                    static_cast<ITfCompartmentEventSink*>(this),
+                    &open_close_cookie_);
+            }
+            SetOpenClose(chinese_);
+        }
 
         HMODULE module = nullptr;
         GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
@@ -261,6 +282,15 @@ public:
             langbar_mgr_.Reset();
         }
         langbar_sink_.Reset();
+        if (open_close_) {
+            ComPtr<ITfSource> open_close_source;
+            if (open_close_cookie_ &&
+                SUCCEEDED(open_close_.As(&open_close_source))) {
+                open_close_source->UnadviseSink(open_close_cookie_);
+            }
+            open_close_cookie_ = 0;
+            open_close_.Reset();
+        }
         thread_mgr_.Reset();
         client_id_ = TF_CLIENTID_NULL;
         shift_down_ = shift_used_ = false;
@@ -356,6 +386,33 @@ public:
             langbar_sink_->OnUpdate(TF_LBI_ICON | TF_LBI_TEXT |
                                     TF_LBI_TOOLTIP);
         }
+    }
+
+    // ---- mode synchronization with TSF --------------------------------
+    void SetOpenClose(bool open) {
+        if (!open_close_) return;
+        VARIANT value;
+        VariantInit(&value);
+        value.vt = VT_I4;
+        value.lVal = open ? 1 : 0;
+        open_close_->SetValue(client_id_, &value);
+    }
+
+    STDMETHODIMP OnChange(REFGUID guid) override {
+        // Ctrl+Space, the touch keyboard and IME-aware apps toggle the mode
+        // through this compartment; follow them instead of keeping a private
+        // idea of 中/英. SetValue must not be called from here.
+        if (!open_close_ ||
+            !IsEqualGUID(guid, GUID_COMPARTMENT_KEYBOARD_OPENCLOSE)) {
+            return S_OK;
+        }
+        VARIANT value;
+        VariantInit(&value);
+        if (FAILED(open_close_->GetValue(&value))) return S_OK;
+        const bool open = value.vt == VT_I4 && value.lVal != 0;
+        VariantClear(&value);
+        if (open != chinese_) ApplyMode(open);
+        return S_OK;
     }
 
     // ---- host window minimize --------------------------------------------
@@ -721,6 +778,7 @@ private:
         app_ = ProcessImageName();
         // Modern IMEs remember the Chinese/English state per application.
         chinese_ = LoadAppMode(app_, settings_.chinese != 0);
+        SetOpenClose(chinese_);
         UpdateLangBar();
         session_ = CoreEngine::Instance().OpenSession(
             notify_hwnd_, app_, PIME_FIELD_TEXT, kHostCaps, settings_.page_size);
@@ -1027,7 +1085,14 @@ private:
     }
 
     void ToggleChinese() {
-        chinese_ = !chinese_;
+        ApplyMode(!chinese_);
+        SetOpenClose(chinese_);
+    }
+
+    // Applies a mode change from Shift, the language bar button or the
+    // keyboard open/close compartment.
+    void ApplyMode(bool chinese) {
+        chinese_ = chinese;
         settings_.chinese = chinese_ ? 1 : 0;
         // Persist only the per-app mode. Writing the whole settings blob from
         // inside the host would, under MSIX registry virtualization, freeze a
@@ -1096,6 +1161,8 @@ private:
     ComPtr<ITfKeystrokeMgr> keys_;
     ComPtr<ITfLangBarItemMgr> langbar_mgr_;
     ComPtr<ITfLangBarItemSink> langbar_sink_;
+    ComPtr<ITfCompartment> open_close_;
+    DWORD open_close_cookie_ = 0;
     TfClientId client_id_ = TF_CLIENTID_NULL;
     DWORD thread_event_cookie_ = 0;
     DWORD thread_focus_cookie_ = 0;

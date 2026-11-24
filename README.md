@@ -14,8 +14,8 @@ Windows 平台的拼音输入法：输入法内核直接复用 `pime-core`（WAM
   Tab / Enter / Esc 操作。
 - 中英文状态按应用分别记忆（`HKCU\Software\PIME\AppMode`），新应用默认使用
   设置里的「启动时默认中文」。
-- 任务栏输入指示器显示当前状态的 `中` / `英` 图标（蓝色 / 灰色）；点击图标
-  或轻按 Shift 都能切换，图标随状态即时刷新。
+- 任务栏输入指示器显示当前状态的 `中` / `英` 图标（蓝色 / 灰色）；点击图标、
+  轻按 Shift 或 Ctrl+Space 都能切换，图标随状态即时刷新。
 - 组合文本带蓝色点状下划线；中文模式下标点默认转全角（`，。？！；：` 等），
   设置里可改为英文半角（`,.?!`）；输入中按标点会先上屏候选词再输入标点。
 - 安装器把输入法注册为 zh-CN 的键盘 TIP，并自动加入系统输入法列表。
@@ -102,6 +102,11 @@ build\dist\pime.exe --uninstall
   `OnUpdate(TF_LBI_ICON | TF_LBI_TEXT | TF_LBI_TOOLTIP)` 让它重取图标。
   `GetIcon` 每次从 `pime_tsf.dll` 资源重新 `LoadImage`，不能返回 `LR_SHARED`
   句柄：语言栏会 `DestroyIcon` 释放收到的图标。
+- 中英文状态同时写进线程管理器的 `GUID_COMPARTMENT_KEYBOARD_OPENCLOSE`
+  compartment：输入指示器、Ctrl+Space、触摸键盘以及通过 IMM32 兼容层查询
+  `ImmGetOpenStatus` 的程序看到的是同一个状态。反向也成立——系统改变该
+  compartment（Ctrl+Space、外部 IME 切换）时，`ITfCompartmentEventSink`
+  通知我们把引擎、气泡和任务栏图标一起切过去。
 - 组合文本的显示属性通过 `GUID_PROP_ATTRIBUTE` 设置，值是
   `ITfCategoryMgr::RegisterGUID` 返回的 atom（`VT_I4`），不是属性对象本身。
 - 插件链在空格/回车/鼠标选词时会自行清空拼音缓冲，但数字键选词不会；
