@@ -97,38 +97,28 @@ set_target_properties(pime_tsf PROPERTIES
 )
 
 # ---------------------------------------------------------------------------
-# Tools: headless kernel probe, settings/tray app, editor used for testing
+# Single front-end executable: settings UI by default, plus the installer,
+# the headless kernel probe (--keys) and the test editor (--demo).
 # ---------------------------------------------------------------------------
-add_executable(pime-cli src/cli/main.cpp)
-target_compile_options(pime-cli PRIVATE /utf-8 /W4 /permissive-)
-target_link_libraries(pime-cli PRIVATE pime_host)
-set_target_properties(pime-cli PROPERTIES OUTPUT_NAME "pime-cli")
-
-add_executable(pime-settings WIN32
+add_executable(pime WIN32
     src/app/main.cpp
     src/app/settings_window.cpp
     src/tsf/register.cpp
+    src/demo/main.cpp
+    src/cli/main.cpp
 )
-target_compile_definitions(pime-settings PRIVATE
+target_compile_definitions(pime PRIVATE
     UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
-target_compile_options(pime-settings PRIVATE /utf-8 /W4 /permissive-)
-target_link_libraries(pime-settings PRIVATE
-    pime_host advapi32 shell32 comctl32 comdlg32 dwmapi uxtheme user32 gdi32 ole32)
-set_target_properties(pime-settings PROPERTIES OUTPUT_NAME "pime-settings")
-
-add_executable(pime-demo WIN32 src/demo/main.cpp)
-target_compile_definitions(pime-demo PRIVATE
-    UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
-target_include_directories(pime-demo PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
-target_compile_options(pime-demo PRIVATE /utf-8 /W4 /permissive-)
-target_link_libraries(pime-demo PRIVATE
-    user32 gdi32 shell32 comctl32 ole32 oleaut32 uuid)
-set_target_properties(pime-demo PROPERTIES OUTPUT_NAME "pime-demo")
+target_include_directories(pime PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
+target_compile_options(pime PRIVATE /utf-8 /W4 /permissive-)
+target_link_libraries(pime PRIVATE
+    pime_host advapi32 shell32 comctl32 comdlg32 dwmapi uxtheme user32 gdi32
+    ole32 oleaut32 uuid d2d1 dwrite)
+set_target_properties(pime PROPERTIES OUTPUT_NAME "pime")
 
 # ---------------------------------------------------------------------------
-# Staging: dist/<exe|dll> + assets/{plugins,chains}
+# Staging: dist/{pime.exe,pime_tsf.dll} + assets/{plugins,chains}
 # ---------------------------------------------------------------------------
-set(PIME_STAGE_TARGETS pime_tsf pime-cli pime-settings pime-demo)
 add_custom_target(pime_dist ALL
     COMMAND "${CMAKE_COMMAND}" -E make_directory "${PIME_DIST_DIR}"
     COMMAND "${CMAKE_COMMAND}" -E copy_directory_if_different
@@ -136,16 +126,12 @@ add_custom_target(pime_dist ALL
     COMMAND "${CMAKE_COMMAND}" -E copy_if_different
             $<TARGET_FILE:pime_tsf> "${PIME_DIST_DIR}"
     COMMAND "${CMAKE_COMMAND}" -E copy_if_different
-            $<TARGET_FILE:pime-cli> "${PIME_DIST_DIR}"
-    COMMAND "${CMAKE_COMMAND}" -E copy_if_different
-            $<TARGET_FILE:pime-settings> "${PIME_DIST_DIR}"
-    COMMAND "${CMAKE_COMMAND}" -E copy_if_different
-            $<TARGET_FILE:pime-demo> "${PIME_DIST_DIR}"
-    DEPENDS ${PIME_STAGE_TARGETS}
+            $<TARGET_FILE:pime> "${PIME_DIST_DIR}"
+    DEPENDS pime_tsf pime
     COMMENT "Staging PIME into ${PIME_DIST_DIR}"
 )
 
 add_custom_target(pime_run
-    COMMAND "${PIME_DIST_DIR}/pime-cli.exe" --keys nihao --res "${PIME_DIST_DIR}"
+    COMMAND "${PIME_DIST_DIR}/pime.exe" --keys nihao --res "${PIME_DIST_DIR}"
     DEPENDS pime_dist
     COMMENT "Probe: nihao -> candidates")

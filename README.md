@@ -7,8 +7,11 @@ Windows 平台的拼音输入法：输入法内核直接复用 `pime-core`（WAM
 - 候选条 / 模式气泡：单窗口分层窗口（`WS_EX_LAYERED` + `UpdateLayeredWindow`），
   Direct2D + DirectWrite 绘制，支持高 DPI、浅色/深色、悬停、鼠标点选。
 - Shift 轻按切换中英文并弹出 `中` / `英` 气泡；PageUp/PageDown、上下键翻页；
-  数字键、鼠标或空格选词；每页候选数、输入方案、外观、中文/英文标点可在设置
-  里调整。
+  数字键、鼠标或空格选词。
+- 设置窗口：左侧「常规 / 外观 / 关于」导航，可调输入方案、每页候选数、标点
+  风格、启动时默认中文和主题。界面同样不依赖 UI 框架，用 Direct2D +
+  DirectWrite 自绘（卡片、分段控件、下拉菜单、开关、主题预览），支持键盘
+  Tab / Enter / Esc 操作。
 - 中英文状态按应用分别记忆（`HKCU\Software\PIME\AppMode`），新应用默认使用
   设置里的「启动时默认中文」。
 - 组合文本带蓝色点状下划线；中文模式下标点默认转全角（`，。？！；：` 等），
@@ -22,8 +25,9 @@ src/tsf        TSF 文本服务（注册、键事件、composition、显示属�
 src/ui         候选窗口与模式气泡（纯 Win32/D2D）
 src/engine     pime-core 宿主封装（进程内 worker + 会话）
 src/common     日志、设置（注册表）、Win32 工具
-src/app        设置窗口与 --install/--uninstall 入口
-src/demo       RichEdit 测试宿主（仅测试用）
+src/app        设置窗口与统一入口（--install/--demo/--keys）
+src/demo       RichEdit 测试宿主（pime.exe --demo）
+src/cli        内核探针（pime.exe --keys）
 assets/chains  输入方案；assets/plugins 插件包
 ```
 
@@ -44,13 +48,20 @@ cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
 cmake --build build
 ```
 
-产物全部落在 `build\dist`（`pime_tsf.dll`、`pime-settings.exe`、
-`pime-demo.exe`、`pime-cli.exe` 以及 `chains/`、`plugins/`）。
+产物全部落在 `build\dist`：一个前端可执行文件 `pime.exe`、文本服务
+`pime_tsf.dll`，以及 `chains/`、`plugins/`。
+
+```bat
+build\dist\pime.exe            :: 设置窗口
+build\dist\pime.exe --install  :: 注册输入法（管理员）
+build\dist\pime.exe --demo     :: 测试编辑器
+build\dist\pime.exe --keys nihao  :: 无界面内核探针
+```
 
 ## 试用
 
 ```bat
-build\dist\pime-demo.exe --pime
+build\dist\pime.exe --demo --pime
 ```
 
 `--pime` 仅对当前进程启用 PIME 拼音，便于开发验证，不改变系统默认输入法。
@@ -60,12 +71,12 @@ build\dist\pime-demo.exe --pime
 安装与卸载需要管理员权限：
 
 ```bat
-build\dist\pime-settings.exe --install
-build\dist\pime-settings.exe --uninstall
+build\dist\pime.exe --install
+build\dist\pime.exe --uninstall
 ```
 
-也可以直接运行 `pime-settings.exe` 打开设置窗口，在窗口里保存设置、安装/卸载，
-或点「切换到 PIME」立即启用。安装后可在 Win+Space / 语言栏里选择「PIME 拼音」。
+直接运行 `pime.exe` 会打开设置窗口，可保存设置、安装/卸载，或点
+「切换到 PIME」立即启用。安装后可在 Win+Space / 语言栏里选择「PIME 拼音」。
 
 设置项保存于 `HKCU\Software\PIME`，运行日志写入
 `%LOCALAPPDATA%\PIME\pime-<pid>.log`。
@@ -75,8 +86,14 @@ build\dist\pime-settings.exe --uninstall
 - 内核静态链接进 `pime_tsf.dll`：TSF DLL 会被加载进任意宿主进程，不能依赖
   相对路径查找 `pime_core.dll`；插件链与插件包从 DLL 所在目录的
   `chains/`、`plugins/` 读取。
+- 只有一个前端 exe：设置窗口、安装器、`--demo` 测试编辑器和 `--keys` 内核
+  探针都从 `pime.exe` 进入；安装/卸载按钮用 `runas` 重新启动自身。
 - 候选窗口不接收激活（`WS_EX_NOACTIVATE`），鼠标命中检测在分层位图上完成；
   模式气泡 900ms 后自动隐藏。
+- 设置窗口没有任何原生控件：卡片、分段选择、下拉菜单、开关和主题预览全部
+  用 Direct2D/DirectWrite 绘制，下拉菜单画在窗口内并处理悬停、点击与
+  Tab/Enter/Esc 键盘操作。主题设置只影响候选窗口与气泡，设置窗口本身跟随
+  系统深浅色。
 - 组合文本的显示属性通过 `GUID_PROP_ATTRIBUTE` 设置，值是
   `ITfCategoryMgr::RegisterGUID` 返回的 atom（`VT_I4`），不是属性对象本身。
 - 插件链在空格/回车/鼠标选词时会自行清空拼音缓冲，但数字键选词不会；

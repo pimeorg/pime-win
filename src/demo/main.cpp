@@ -121,7 +121,7 @@ void ActivatePimeForProcess() {
     }
     wchar_t path[MAX_PATH] = {};
     GetTempPathW(MAX_PATH, path);
-    lstrcatW(path, L"pime-demo-activate.log");
+    lstrcatW(path, L"pime-activate.log");
     HANDLE file = CreateFileW(path, GENERIC_WRITE, FILE_SHARE_READ, nullptr,
                               CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
     if (file != INVALID_HANDLE_VALUE) {
@@ -134,21 +134,11 @@ void ActivatePimeForProcess() {
     }
 }
 
-int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
+namespace pimewin {
+
+int RunDemoApp(HINSTANCE instance, bool request_pime) {
     SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
     const HRESULT com = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
-
-    // --pime activates the registered profile for this process only, so the
-    // demo can exercise the text service without changing the user's active
-    // input method for the whole session.
-    bool request_pime = false;
-    int argc = 0;
-    if (wchar_t** argv = CommandLineToArgvW(GetCommandLineW(), &argc)) {
-        for (int i = 1; i < argc; ++i) {
-            if (lstrcmpiW(argv[i], L"--pime") == 0) request_pime = true;
-        }
-        LocalFree(argv);
-    }
 
     WNDCLASSEXW wc{};
     wc.cbSize = sizeof(wc);
@@ -181,3 +171,5 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
     if (SUCCEEDED(com)) CoUninitialize();
     return static_cast<int>(message.wParam);
 }
+
+}  // namespace pimewin

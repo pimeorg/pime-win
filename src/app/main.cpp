@@ -5,7 +5,9 @@
 #include <string>
 
 #include "app/settings_window.h"
+#include "cli/cli_app.h"
 #include "common/win_util.h"
+#include "demo/demo_app.h"
 #include "tsf/register.h"
 
 namespace {
@@ -53,10 +55,32 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
     const bool quiet = argv && WantsFlag(argc, argv, L"--quiet");
     const bool sync_input_list =
         argv && WantsFlag(argc, argv, L"--sync-input-list");
-    if (argv) LocalFree(argv);
+    const bool demo = argv && WantsFlag(argc, argv, L"--demo");
+    const bool pime = argv && WantsFlag(argc, argv, L"--pime");
+    // The GUI exe has no console of its own; attach to the caller's so the
+    // headless probe can print when run from a terminal.
+    const bool keys = argv && WantsFlag(argc, argv, L"--keys");
+    if (keys) {
+        // A GUI subsystem process usually inherits the caller's stdout (pipe
+        // or console), which keeps output capturable; only attach a console
+        // when launched without any standard handle.
+        HANDLE out = GetStdHandle(STD_OUTPUT_HANDLE);
+        if (out == nullptr || out == INVALID_HANDLE_VALUE) {
+            if (AttachConsole(ATTACH_PARENT_PROCESS)) {
+                out = CreateFileW(L"CONOUT$", GENERIC_WRITE, FILE_SHARE_WRITE,
+                                  nullptr, OPEN_EXISTING, 0, nullptr);
+                if (out != INVALID_HANDLE_VALUE) SetStdHandle(STD_OUTPUT_HANDLE, out);
+            }
+        }
+        const int result = pimewin::RunCli(argc, argv);
+        if (argv) LocalFree(argv);
+        return result;
+    }
 
     if (sync_input_list) {
-        return pimewin::AddToUserInputList() ? 0 : 1;
+        const int result = pimewin::AddToUserInputList() ? 0 : 1;
+        if (argv) LocalFree(argv);
+        return result;
     }
 
     const HRESULT com = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
@@ -76,7 +100,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
             if (!quiet) {
                 ShowResult(nullptr,
                            ok ? L"安装完成。可在系统输入法列表中选择「PIME 拼音」，"
-                                L"或点击设置窗口中的「切换到 PIME」。"
+                                L"或在设置窗口里点「切换到 PIME」。"
                               : L"安装失败。请确认以管理员身份运行，并查看日志。",
                            ok);
             }
@@ -89,10 +113,13 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
             }
             result = ok ? 0 : 1;
         }
+    } else if (demo) {
+        result = pimewin::RunDemoApp(instance, pime);
     } else {
         result = pimewin::RunSettingsApp(instance);
     }
 
     if (SUCCEEDED(com)) CoUninitialize();
+    if (argv) LocalFree(argv);
     return result;
 }

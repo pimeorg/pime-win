@@ -1,5 +1,6 @@
 // COM entry points for the TSF in-proc server. Registration lives in
-// register.cpp (driven by pime-settings), so this file only creates objects.
+// register.cpp (driven by pime.exe --install), so this file only creates
+// objects.
 #include <windows.h>
 
 #include <new>

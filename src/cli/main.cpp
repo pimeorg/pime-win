@@ -1,7 +1,7 @@
 // Headless probe for the reused kernel + plugin packages.
 //
-//   pime-cli --keys nihao            type nihao, show the chain output
-//   pime-cli --keys nihao --commit   ... then press space to commit
+//   pime --keys nihao            type nihao, show the chain output
+//   pime --keys nihao --commit   ... then press space to commit
 //
 // It runs the same host layer as the text service (CoreEngine), so a failure
 // here is a kernel/plugin/chain problem, not a TSF one.
@@ -111,8 +111,8 @@ Options Parse(int argc, wchar_t** argv) {
         else if (arg == L"--keys") options.keys = pimewin::ToUtf8(next());
         else if (arg == L"--commit") options.commit = true;
         else if (arg == L"--help" || arg == L"-h") {
-            Print(L"pime-cli [--res DIR] [--data DIR] [--chain FILE] "
-                  L"--keys TEXT [--commit]\n");
+            Print(L"pime --keys TEXT [--commit] [--res DIR] [--data DIR] "
+                  L"[--chain FILE]\n");
             ExitProcess(0);
         }
     }
@@ -136,7 +136,7 @@ int Run(const Options& options) {
     Print(L"core " + engine.version() + L" started in " +
           std::to_wstring(GetTickCount64() - started) + L" ms\n");
 
-    const SessionId session = engine.OpenSession(nullptr, L"pime-cli.exe",
+    const SessionId session = engine.OpenSession(nullptr, L"pime.exe",
                                                  PIME_FIELD_TEXT, 0);
     if (!session) {
         Print(L"session create failed\n");
@@ -180,6 +180,10 @@ int Run(const Options& options) {
 
 }  // namespace
 
-int wmain(int argc, wchar_t** argv) {
+namespace pimewin {
+
+int RunCli(int argc, wchar_t** argv) {
     return Run(Parse(argc, argv));
 }
+
+}  // namespace pimewin
