@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.25)
 
-project(pime_win VERSION 1.0.0 LANGUAGES C CXX)
+project(pime_win VERSION 1.0.0 LANGUAGES C CXX RC)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -103,6 +103,7 @@ set_target_properties(pime_tsf PROPERTIES
 add_executable(pime WIN32
     src/app/main.cpp
     src/app/settings_window.cpp
+    src/app/pime.rc
     src/tsf/register.cpp
     src/demo/main.cpp
     src/cli/main.cpp

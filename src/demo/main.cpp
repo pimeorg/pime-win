@@ -9,6 +9,7 @@
 
 #include <string>
 
+#include "app/resource.h"
 #include "tsf/guids.h"
 
 using Microsoft::WRL::ComPtr;
@@ -145,7 +146,13 @@ int RunDemoApp(HINSTANCE instance, bool request_pime) {
     wc.lpfnWndProc = WndProc;
     wc.hInstance = instance;
     wc.hCursor = LoadCursorW(nullptr, IDC_IBEAM);
-    wc.hIcon = LoadIconW(nullptr, IDI_APPLICATION);
+    wc.hIcon = static_cast<HICON>(LoadImageW(
+        instance, MAKEINTRESOURCEW(IDI_APP), IMAGE_ICON,
+        GetSystemMetrics(SM_CXICON), GetSystemMetrics(SM_CYICON), LR_SHARED));
+    wc.hIconSm = static_cast<HICON>(LoadImageW(
+        instance, MAKEINTRESOURCEW(IDI_APP), IMAGE_ICON,
+        GetSystemMetrics(SM_CXSMICON), GetSystemMetrics(SM_CYSMICON),
+        LR_SHARED));
     wc.lpszClassName = kClassName;
     RegisterClassExW(&wc);
 
