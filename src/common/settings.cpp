@@ -20,6 +20,8 @@ Settings LoadSettings() {
     settings.page_size =
         RegistryGetDword(HKEY_CURRENT_USER, kRoot, L"PageSize", 6);
     settings.chinese = RegistryGetDword(HKEY_CURRENT_USER, kRoot, L"Chinese", 1);
+    settings.punctuation =
+        RegistryGetDword(HKEY_CURRENT_USER, kRoot, L"Punctuation", 1);
 
     if (settings.chain.empty() || settings.chain.find(L"..") != std::wstring::npos ||
         settings.chain.find_first_of(L"\\/:") != std::wstring::npos) {
@@ -29,6 +31,7 @@ Settings LoadSettings() {
     if (settings.page_size < 3) settings.page_size = 3;
     if (settings.page_size > 9) settings.page_size = 9;
     settings.chinese = settings.chinese ? 1 : 0;
+    settings.punctuation = settings.punctuation ? 1 : 0;
     return settings;
 }
 
@@ -37,6 +40,8 @@ void SaveSettings(const Settings& settings) {
     RegistrySetDword(HKEY_CURRENT_USER, kRoot, L"Theme", settings.theme);
     RegistrySetDword(HKEY_CURRENT_USER, kRoot, L"PageSize", settings.page_size);
     RegistrySetDword(HKEY_CURRENT_USER, kRoot, L"Chinese", settings.chinese);
+    RegistrySetDword(HKEY_CURRENT_USER, kRoot, L"Punctuation",
+                     settings.punctuation);
 }
 
 bool LoadAppMode(const std::wstring& app, bool fallback) {

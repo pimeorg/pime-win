@@ -22,6 +22,7 @@ constexpr int kChainCombo = 1;
 constexpr int kPageCombo = 2;
 constexpr int kThemeCombo = 3;
 constexpr int kChineseCheck = 4;
+constexpr int kPunctuationCombo = 5;
 constexpr int kApplyButton = 101;
 constexpr int kInstallButton = 102;
 constexpr int kUninstallButton = 103;
@@ -41,6 +42,7 @@ struct AppState {
     HWND page = nullptr;
     HWND theme = nullptr;
     HWND chinese = nullptr;
+    HWND punctuation = nullptr;
     std::wstring status;
     std::vector<std::wstring> chains;
 };
@@ -119,11 +121,12 @@ void Layout(AppState& state, HWND window) {
     Place(state.chain, state, 128, 100, 300, combo_height);
     Place(state.page, state, 128, 140, 100, combo_height);
     Place(state.theme, state, 128, 180, 180, combo_height);
-    Place(state.chinese, state, 128, 218, 260, 24);
-    Place(GetDlgItem(window, kApplyButton), state, 24, 268, 112, 32);
-    Place(GetDlgItem(window, kInstallButton), state, 146, 268, 112, 32);
-    Place(GetDlgItem(window, kUninstallButton), state, 268, 268, 92, 32);
-    Place(GetDlgItem(window, kActivateButton), state, 370, 268, 126, 32);
+    Place(state.punctuation, state, 128, 218, 180, combo_height);
+    Place(state.chinese, state, 128, 256, 260, 24);
+    Place(GetDlgItem(window, kApplyButton), state, 24, 296, 112, 32);
+    Place(GetDlgItem(window, kInstallButton), state, 146, 296, 112, 32);
+    Place(GetDlgItem(window, kUninstallButton), state, 268, 296, 92, 32);
+    Place(GetDlgItem(window, kActivateButton), state, 370, 296, 126, 32);
 }
 
 void Apply(AppState& state, HWND window) {
@@ -138,6 +141,11 @@ void Apply(AppState& state, HWND window) {
     const int theme_index =
         static_cast<int>(SendMessageW(state.theme, CB_GETCURSEL, 0, 0));
     if (theme_index >= 0) settings.theme = static_cast<uint32_t>(theme_index);
+    const int punctuation_index =
+        static_cast<int>(SendMessageW(state.punctuation, CB_GETCURSEL, 0, 0));
+    if (punctuation_index >= 0) {
+        settings.punctuation = punctuation_index == 0 ? 1u : 0u;
+    }
     settings.chinese =
         SendMessageW(state.chinese, BM_GETCHECK, 0, 0) == BST_CHECKED ? 1u : 0u;
     SaveSettings(settings);
@@ -172,6 +180,11 @@ void Populate(AppState& state, HWND window) {
     AddComboString(state.theme, L"浅色");
     AddComboString(state.theme, L"深色");
     SendMessageW(state.theme, CB_SETCURSEL, settings.theme, 0);
+
+    AddComboString(state.punctuation, L"中文全角（，。？！）");
+    AddComboString(state.punctuation, L"英文半角（,.?!）");
+    SendMessageW(state.punctuation, CB_SETCURSEL,
+                 settings.punctuation ? 0 : 1, 0);
 
     SendMessageW(state.chinese, BM_SETCHECK,
                  settings.chinese ? BST_CHECKED : BST_UNCHECKED, 0);
@@ -210,6 +223,11 @@ LRESULT CALLBACK WndProc(HWND window, UINT message, WPARAM wparam,
                 0, WC_COMBOBOXW, L"", combo_style, 0, 0, 0, 0, window,
                 reinterpret_cast<HMENU>(static_cast<INT_PTR>(kThemeCombo)),
                 self->instance, nullptr);
+            self->punctuation = CreateWindowExW(
+                0, WC_COMBOBOXW, L"", combo_style, 0, 0, 0, 0, window,
+                reinterpret_cast<HMENU>(
+                    static_cast<INT_PTR>(kPunctuationCombo)),
+                self->instance, nullptr);
             self->chinese = CreateWindowExW(
                 0, WC_BUTTONW, L"启动时默认中文",
                 WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX, 0, 0, 0,
@@ -228,7 +246,7 @@ LRESULT CALLBACK WndProc(HWND window, UINT message, WPARAM wparam,
                     self->instance, nullptr);
             }
             for (HWND control : {self->chain, self->page, self->theme,
-                                 self->chinese}) {
+                                 self->punctuation, self->chinese}) {
                 SendMessageW(control, WM_SETFONT,
                              reinterpret_cast<WPARAM>(self->font), TRUE);
             }
@@ -247,7 +265,7 @@ LRESULT CALLBACK WndProc(HWND window, UINT message, WPARAM wparam,
             state->dpi = HIWORD(wparam);
             CreateFonts(*state);
             for (HWND control : {state->chain, state->page, state->theme,
-                                 state->chinese,
+                                 state->punctuation, state->chinese,
                                  GetDlgItem(window, kApplyButton),
                                  GetDlgItem(window, kInstallButton),
                                  GetDlgItem(window, kUninstallButton),
@@ -340,6 +358,8 @@ LRESULT CALLBACK WndProc(HWND window, UINT message, WPARAM wparam,
                      Scaled(*state, 166)},
                     {margin, Scaled(*state, 184), margin + Scaled(*state, 100),
                      Scaled(*state, 206)},
+                    {margin, Scaled(*state, 222), margin + Scaled(*state, 100),
+                     Scaled(*state, 244)},
                 };
                 SetTextColor(dc, kText);
                 DrawTextW(dc, L"输入方案", -1, &labels[0],
@@ -347,16 +367,17 @@ LRESULT CALLBACK WndProc(HWND window, UINT message, WPARAM wparam,
                 DrawTextW(dc, L"候选每页", -1, &labels[1],
                           DT_LEFT | DT_SINGLELINE);
                 DrawTextW(dc, L"外观", -1, &labels[2], DT_LEFT | DT_SINGLELINE);
+                DrawTextW(dc, L"标点", -1, &labels[3], DT_LEFT | DT_SINGLELINE);
 
                 SetTextColor(dc, kAccent);
-                RECT status{margin, Scaled(*state, 316),
-                            client.right - margin, Scaled(*state, 338)};
+                RECT status{margin, Scaled(*state, 344),
+                            client.right - margin, Scaled(*state, 366)};
                 DrawTextW(dc, state->status.c_str(), -1, &status,
                           DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
 
                 SetTextColor(dc, kSecondary);
-                RECT hint{margin, Scaled(*state, 342), client.right - margin,
-                          Scaled(*state, 364)};
+                RECT hint{margin, Scaled(*state, 370), client.right - margin,
+                          Scaled(*state, 392)};
                 DrawTextW(dc, L"Shift 切换中英文 · 输入法列表里可切换 PIME 拼音",
                           -1, &hint, DT_LEFT | DT_SINGLELINE);
                 SelectObject(dc, old);
@@ -399,7 +420,7 @@ int RunSettingsApp(HINSTANCE instance) {
     state.instance = instance;
 
     const UINT dpi = GetDpiForSystem();
-    RECT rect{0, 0, MulDiv(520, dpi, 96), MulDiv(380, dpi, 96)};
+    RECT rect{0, 0, MulDiv(520, dpi, 96), MulDiv(400, dpi, 96)};
     AdjustWindowRectExForDpi(&rect, WS_OVERLAPPEDWINDOW & ~WS_MAXIMIZEBOX &
                                           ~WS_THICKFRAME,
                              FALSE, 0, dpi);

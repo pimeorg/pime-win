@@ -329,14 +329,20 @@ public:
         if (shift_down_) shift_used_ = true;
         if (!ShouldClaim(vkey, lparam) || !session_) return S_OK;
 
-        // Chinese punctuation: a mark typed while composing commits the
-        // selected candidate first, then goes in full width; while idle it is
-        // inserted directly. v-mode expressions ("v1.5") keep their ASCII
-        // operators and single quotes stay syllable separators ("xi'an").
+        // A mark typed while composing commits the selected candidate first,
+        // then goes in as typed; while idle it is inserted directly. The
+        // setting chooses full-width Chinese marks or ASCII. v-mode
+        // expressions ("v1.5") keep their ASCII operators and single quotes
+        // stay syllable separators ("xi'an").
         const std::string ascii = KeyText(vkey, lparam);
-        const std::wstring punctuation =
-            composition_text_.empty() && ascii == "'" ? L"’"
-                                                      : ChinesePunctuation(ascii);
+        const std::wstring converted = ChinesePunctuation(ascii);
+        const bool full_width = settings_.punctuation != 0;
+        std::wstring punctuation;
+        if (!converted.empty()) {
+            punctuation = full_width ? converted : ToWide(ascii);
+        } else if (composition_text_.empty() && ascii == "'") {
+            punctuation = full_width ? L"’" : L"'";
+        }
         const bool v_mode =
             !composition_text_.empty() &&
             (composition_text_[0] == L'v' || composition_text_[0] == L'V');

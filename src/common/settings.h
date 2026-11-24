@@ -11,6 +11,8 @@ struct Settings {
     uint32_t page_size = 6;
     // 1 = Chinese (compose), 0 = English (pass through).
     uint32_t chinese = 1;
+    // 1 = full-width Chinese punctuation, 0 = ASCII punctuation.
+    uint32_t punctuation = 1;
 };
 
 Settings LoadSettings();
