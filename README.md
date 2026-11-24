@@ -98,3 +98,9 @@ build\dist\pime-settings.exe --uninstall
   内写 `HKCU\Software\PIME` 时，改动只对该应用包私有（应用内切换中英文、
   重启后仍保持），设置窗口看到的是真实注册表的值，两者可能不同。
   普通未打包程序（以及设置窗口本身）没有这个隔离。
+
+## 许可证
+
+本仓库以 [Apache License 2.0](LICENSE) 授权，版权归 pime 贡献者所有。
+复用的 [pime-core](../pime-core)、[pime-public-plugin](../pime-public-plugin)
+同样以 Apache 2.0 授权。
