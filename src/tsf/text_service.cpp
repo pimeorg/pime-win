@@ -7,6 +7,7 @@
 #include <msctf.h>
 #include <oleauto.h>
 #include <olectl.h>
+#include <shellapi.h>
 #include <pime/hal.h>
 #include <wrl/client.h>
 
@@ -340,6 +341,7 @@ public:
         (void)point;
         (void)area;
         if (click == TF_LBI_CLK_LEFT) ToggleChinese();
+        else if (click == TF_LBI_CLK_RIGHT) OpenSettings();
         return S_OK;
     }
     STDMETHODIMP InitMenu(ITfMenu*) override { return E_NOTIMPL; }
@@ -999,6 +1001,32 @@ private:
     void ToggleChinese() {
         ApplyMode(!chinese_);
         SetOpenClose(chinese_);
+    }
+
+    // Right-clicking the taskbar 中/英 button opens the settings app, which
+    // dist keeps beside pime_tsf.dll.
+    void OpenSettings() {
+        if (HWND existing = FindWindowW(L"PimeSettingsWindow", nullptr)) {
+            ShowWindow(existing, SW_RESTORE);
+            SetForegroundWindow(existing);
+            return;
+        }
+        HMODULE module = nullptr;
+        GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                               GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                           reinterpret_cast<LPCWSTR>(&CreatePimeTextService),
+                           &module);
+        const std::wstring dir = ModuleDirectory(module);
+        const std::wstring exe = PathJoin(dir, L"pime.exe");
+        if (!FileExists(exe)) {
+            WriteLog(LogLevel::Error, "tsf", "settings exe missing: " + ToUtf8(exe));
+            return;
+        }
+        if (reinterpret_cast<INT_PTR>(ShellExecuteW(
+                nullptr, L"open", exe.c_str(), nullptr, dir.c_str(),
+                SW_SHOWNORMAL)) <= 32) {
+            WriteLog(LogLevel::Error, "tsf", "settings launch failed");
+        }
     }
 
     // Applies a mode change from Shift, the language bar button or the
