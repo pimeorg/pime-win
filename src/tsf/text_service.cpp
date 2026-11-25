@@ -36,6 +36,7 @@ namespace {
 constexpr uint32_t kHostCaps = 1u << 4;
 constexpr wchar_t kNotifyClassName[] = L"PimeNotifyWindow";
 constexpr DWORD kLangBarSinkCookie = 0x50494D45;  // 'PIME'
+constexpr UINT kMenuSettings = 1;
 
 class TextServiceImpl;
 
@@ -338,10 +339,9 @@ public:
     }
     STDMETHODIMP OnClick(TfLBIClick click, POINT point,
                          const RECT* area) override {
-        (void)point;
         (void)area;
         if (click == TF_LBI_CLK_LEFT) ToggleChinese();
-        else if (click == TF_LBI_CLK_RIGHT) OpenSettings();
+        else if (click == TF_LBI_CLK_RIGHT) ShowContextMenu(point);
         return S_OK;
     }
     STDMETHODIMP InitMenu(ITfMenu*) override { return E_NOTIMPL; }
@@ -1114,8 +1114,25 @@ private:
         SetOpenClose(chinese_);
     }
 
-    // Right-clicking the taskbar 中/英 button opens the settings app, which
-    // dist keeps beside pime_tsf.dll.
+    // Right-click menu on the taskbar 中/英 button. TPM_RETURNCMD hands the
+    // chosen item back here, so no WM_COMMAND handling is needed; the hidden
+    // notify window only serves as the same-thread owner TrackPopupMenu wants.
+    void ShowContextMenu(POINT point) {
+        if (!notify_hwnd_) return;
+        const HMENU menu = CreatePopupMenu();
+        if (!menu) return;
+        AppendMenuW(menu, MF_STRING, kMenuSettings, L"设置...");
+        SetForegroundWindow(notify_hwnd_);
+        const UINT cmd = TrackPopupMenu(
+            menu, TPM_RETURNCMD | TPM_RIGHTBUTTON | TPM_NONOTIFY, point.x,
+            point.y, 0, notify_hwnd_, nullptr);
+        DestroyMenu(menu);
+        PostMessageW(notify_hwnd_, WM_NULL, 0, 0);
+        if (cmd == kMenuSettings) OpenSettings();
+    }
+
+    // The 设置 item launches the settings app, which dist keeps beside
+    // pime_tsf.dll.
     void OpenSettings() {
         if (HWND existing = FindWindowW(L"PimeSettingsWindow", nullptr)) {
             ShowWindow(existing, SW_RESTORE);
