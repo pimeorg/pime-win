@@ -40,8 +40,7 @@ public:
     // `caret` is the composition caret in physical screen pixels. `page` is
     // the zero-based page shown; `has_prev`/`has_next` drive the chevrons.
     void ShowCandidates(const std::vector<CandidateItem>& items, int page,
-                        bool has_prev, bool has_next, bool chinese,
-                        const RECT& caret);
+                        bool has_prev, bool has_next, const RECT& caret);
     void ShowModeBadge(bool chinese, const RECT& caret);
     void Hide();
 

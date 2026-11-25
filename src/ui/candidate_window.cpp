@@ -221,10 +221,9 @@ void CandidateWindow::SetDark(bool dark) {
 
 void CandidateWindow::ShowCandidates(const std::vector<CandidateItem>& items,
                                      int page, bool has_prev, bool has_next,
-                                     bool chinese, const RECT& caret) {
+                                     const RECT& caret) {
     if (!hwnd_) return;
     badge_ = false;
-    chinese_ = chinese;
     page_ = page;
     has_prev_ = has_prev;
     has_next_ = has_next;
@@ -239,11 +238,6 @@ void CandidateWindow::ShowCandidates(const std::vector<CandidateItem>& items,
     const float top = kShadowMargin;
     const float bottom = kShadowMargin + kCardHeight;
     float x = kShadowMargin + 8.0f;
-
-    chip_rect_ = D2D1::RectF(x, top + (kCardHeight - kChipHeight) / 2.0f,
-                             x + kChipWidth,
-                             top + (kCardHeight + kChipHeight) / 2.0f);
-    x += kChipWidth + 8.0f;
 
     for (const auto& item : items) {
         const float label_width =
@@ -435,17 +429,19 @@ void CandidateWindow::Paint() {
     brush->SetColor(palette.border);
     target_->DrawRoundedRectangle(card, brush.Get(), 1.0f);
 
-    // Mode chip.
-    D2D1_ROUNDED_RECT chip =
-        D2D1::RoundedRect(chip_rect_, 7.0f, 7.0f);
-    if (chinese_) {
-        brush->SetColor(palette.accent);
-        target_->FillRoundedRectangle(chip, brush.Get());
-    } else {
-        brush->SetColor(palette.hover);
-        target_->FillRoundedRectangle(chip, brush.Get());
-        brush->SetColor(palette.border);
-        target_->DrawRoundedRectangle(chip, brush.Get(), 1.0f);
+    // Mode chip (badge only).
+    if (badge_) {
+        D2D1_ROUNDED_RECT chip =
+            D2D1::RoundedRect(chip_rect_, 7.0f, 7.0f);
+        if (chinese_) {
+            brush->SetColor(palette.accent);
+            target_->FillRoundedRectangle(chip, brush.Get());
+        } else {
+            brush->SetColor(palette.hover);
+            target_->FillRoundedRectangle(chip, brush.Get());
+            brush->SetColor(palette.border);
+            target_->DrawRoundedRectangle(chip, brush.Get(), 1.0f);
+        }
     }
 
     auto draw_text = [&](const std::wstring& text, IDWriteTextFormat* format,
@@ -462,8 +458,10 @@ void CandidateWindow::Paint() {
                                 brush.Get());
     };
 
-    draw_text(chinese_ ? L"中" : L"英", chip_format_.Get(), chip_rect_,
-              chinese_ ? palette.accent_text : palette.accent);
+    if (badge_) {
+        draw_text(chinese_ ? L"中" : L"英", chip_format_.Get(), chip_rect_,
+                  chinese_ ? palette.accent_text : palette.accent);
+    }
 
     for (size_t i = 0; i < items_.size(); ++i) {
         const ItemBox& box = items_[i];
@@ -574,7 +572,7 @@ int CandidateWindow::HitTest(int x, int y) const {
         return point.x >= rect.left && point.x <= rect.right &&
                point.y >= rect.top && point.y <= rect.bottom;
     };
-    if (inside(chip_rect_)) return -100;
+    if (badge_ && inside(chip_rect_)) return -100;
     for (const HitBox& hit : hits_) {
         if (inside(hit.rect)) return hit.kind;
     }

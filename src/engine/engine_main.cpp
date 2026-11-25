@@ -240,7 +240,7 @@ void Render(SessionId session, bool badge = false) {
         caret = RECT{point.x, point.y, point.x, point.y};
     }
     g_window.ShowCandidates(ui.items, static_cast<int>(ui.page), ui.page > 0,
-                            ui.items.size() >= ui.page_size, ui.chinese, caret);
+                            ui.items.size() >= ui.page_size, caret);
     g_shown = session;
 }
 
