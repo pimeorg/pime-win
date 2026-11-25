@@ -1,6 +1,6 @@
-// TSF text service: owns the composition in the focused document, forwards
-// keys to pime-core through CoreEngine and renders pime-core's commands with
-// the layered candidate window.
+// TSF text service: owns the composition in the focused document and forwards
+// keys to pime_engine. The candidate strip and the mode badge are drawn in the
+// engine, so replacing that process updates the UI without restarting hosts.
 #include "tsf/text_service.h"
 
 #include <ctffunc.h>
@@ -21,11 +21,10 @@
 #include "common/log.h"
 #include "common/settings.h"
 #include "common/win_util.h"
-#include "engine/core_engine.h"
+#include "tsf/ipc_client.h"
 #include "tsf/display_attr.h"
 #include "tsf/guids.h"
 #include "tsf/resource.h"
-#include "ui/candidate_window.h"
 
 using Microsoft::WRL::ComPtr;
 
@@ -73,29 +72,7 @@ private:
     std::function<void(TfEditCookie)> body_;
 };
 
-enum class Nav { None, Prev, Next, First, Last };
-
-bool DarkFor(uint32_t theme) {
-    if (theme == 1) return false;
-    if (theme == 2) return true;
-    return !SystemUsesLightTheme();
-}
-
 bool ModifierDown(int vkey) { return (GetKeyState(vkey) & 0x8000) != 0; }
-
-int PageAfter(int page, Nav nav) {
-    switch (nav) {
-        case Nav::Prev:
-            return page > 0 ? page - 1 : 0;
-        case Nav::Next:
-        case Nav::Last:
-            return page + 1;
-        case Nav::First:
-        case Nav::None:
-            return 0;
-    }
-    return 0;
-}
 
 class TextServiceImpl final : public ITfTextInputProcessorEx,
                               public ITfThreadMgrEventSink,
@@ -105,8 +82,7 @@ class TextServiceImpl final : public ITfTextInputProcessorEx,
                               public ITfDisplayAttributeProvider,
                               public ITfLangBarItemButton,
                               public ITfSource,
-                              public ITfCompartmentEventSink,
-                              public CandidateWindow::Delegate {
+                              public ITfCompartmentEventSink {
 public:
     TextServiceImpl() = default;
 
@@ -158,6 +134,9 @@ public:
         (void)flags;
         if (!thread_mgr) return E_INVALIDARG;
         if (thread_mgr_) return S_OK;
+        // The shell now runs in a host process of its own, so give it a log
+        // file next to the engine's.
+        InitLog(DataDirectory());
         thread_mgr_ = thread_mgr;
         client_id_ = client_id;
 
@@ -178,7 +157,6 @@ public:
 
         settings_ = LoadSettings();
         chinese_ = settings_.chinese != 0;
-        theme_dark_ = DarkFor(settings_.theme);
 
         // Publish the mode through TSF's keyboard open/close compartment so
         // the input indicator, Ctrl+Space and IME-aware apps see the same
@@ -203,24 +181,25 @@ public:
                                GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
                            reinterpret_cast<LPCWSTR>(&CreatePimeTextService),
                            &module);
-        EngineConfig config;
-        // Staging keeps chains/ and plugins/ next to pime_tsf.dll.
-        config.resources_dir = ModuleDirectory(module);
-        config.data_dir = DataDirectory();
-        config.chain = ToUtf8(settings_.chain);
-        config.page_size = settings_.page_size;
-        engine_ready_ = CoreEngine::Instance().Start(config);
+        // Staging keeps pime_engine.exe next to pime_tsf.dll.
+        const std::wstring engine_exe = PathJoin(ModuleDirectory(module), L"pime_engine.exe");
+        engine_ready_ = IpcClient::Instance().Start(engine_exe);
         if (!engine_ready_) {
             WriteLog(LogLevel::Error, "tsf",
-                     "pime-core failed to start from " +
-                         ToUtf8(config.resources_dir));
+                     "pime_engine failed to start from " + ToUtf8(engine_exe));
+        } else {
+            // Take the settings from the engine: HKCU reads from a packaged
+            // host (Notepad and friends) see a virtualized, empty copy, which
+            // would leave the shell stuck in English mode.
+            settings_ = IpcClient::Instance().settings();
+            chinese_ = settings_.chinese != 0;
+            SetOpenClose(chinese_);
+            WriteLog(LogLevel::Info, "tsf",
+                     "mode from engine: chinese=" + std::to_string(settings_.chinese) +
+                         " page=" + std::to_string(settings_.page_size));
         }
 
         CreateNotifyWindow();
-        window_.SetDark(theme_dark_);
-        WriteLog(LogLevel::Info, "tsf",
-                 window_.Create(this) ? "candidate window created"
-                                      : "candidate window create failed");
         minimize_owner_ = this;
         if (!minimize_hook_) {
             minimize_hook_ = SetWinEventHook(
@@ -256,7 +235,6 @@ public:
             minimize_hook_ = nullptr;
         }
         if (minimize_owner_ == this) minimize_owner_ = nullptr;
-        window_.Destroy();
         if (notify_hwnd_) {
             DestroyWindow(notify_hwnd_);
             notify_hwnd_ = nullptr;
@@ -341,11 +319,20 @@ public:
                            reinterpret_cast<LPCWSTR>(&CreatePimeTextService),
                            &module);
         // The language bar destroys the icon it receives, so this must be a
-        // fresh load rather than LR_SHARED.
+        // fresh load rather than LR_SHARED. Prefer the icon beside the DLL
+        // (replaceable without touching this module) and fall back to the
+        // embedded copy when an older install has none.
+        const std::wstring path = PathJoin(
+            ModuleDirectory(module), chinese_ ? L"mode_zh.ico" : L"mode_en.ico");
         *icon = static_cast<HICON>(LoadImageW(
-            module, MAKEINTRESOURCEW(chinese_ ? IDI_MODE_ZH : IDI_MODE_EN),
-            IMAGE_ICON, GetSystemMetrics(SM_CXSMICON),
-            GetSystemMetrics(SM_CYSMICON), 0));
+            nullptr, path.c_str(), IMAGE_ICON, GetSystemMetrics(SM_CXSMICON),
+            GetSystemMetrics(SM_CYSMICON), LR_LOADFROMFILE));
+        if (!*icon) {
+            *icon = static_cast<HICON>(LoadImageW(
+                module, MAKEINTRESOURCEW(chinese_ ? IDI_MODE_ZH : IDI_MODE_EN),
+                IMAGE_ICON, GetSystemMetrics(SM_CXSMICON),
+                GetSystemMetrics(SM_CYSMICON), 0));
+        }
         return *icon ? S_OK : E_FAIL;
     }
     STDMETHODIMP OnClick(TfLBIClick click, POINT point,
@@ -427,10 +414,7 @@ public:
     void OnHostMinimized() {
         // Only hide the strip: cancelling the composition needs an edit
         // session the host can refuse while the window is being minimized.
-        candidates_.clear();
-        candidates_visible_ = false;
-        page_ = 0;
-        window_.Hide();
+        if (session_) IpcClient::Instance().HideCandidates(session_);
     }
 
     // ---- ITfThreadMgrEventSink ------------------------------------------
@@ -459,17 +443,16 @@ public:
         shift_down_ = shift_used_ = false;
         if (!engine_ready_) return S_OK;
         if (!session_ && context_) StartSession();
-        else if (session_) CoreEngine::Instance().Focus(session_, true);
+        else if (session_) IpcClient::Instance().Focus(session_, true);
         return S_OK;
     }
     STDMETHODIMP OnKillThreadFocus() override {
         shift_down_ = shift_used_ = false;
         if (composition_) CancelComposition();
-        candidates_.clear();
-        candidates_visible_ = false;
-        page_ = 0;
-        window_.Hide();
-        if (session_) CoreEngine::Instance().Focus(session_, false);
+        if (session_) {
+            IpcClient::Instance().HideCandidates(session_);
+            IpcClient::Instance().Focus(session_, false);
+        }
         return S_OK;
     }
 
@@ -523,20 +506,17 @@ public:
             (composition_text_[0] == L'v' || composition_text_[0] == L'V');
         const bool v_operator = ascii == "." || ascii == "(" || ascii == ")";
         if (!punctuation.empty() && !(v_mode && v_operator)) {
-            if (composition_ || candidates_visible_) {
+            if (composition_ || candidates_up_) {
                 KeyEvent space;
                 space.keycode = VK_SPACE;
                 space.action = PIME_KEY_DOWN;
-                ApplyCommands(CoreEngine::Instance().Key(session_, space).commands);
+                ApplyCommands(IpcClient::Instance().Key(session_, space).commands);
             }
-            if (composition_ || candidates_visible_) {
+            if (composition_ || candidates_up_) {
                 // The space found nothing to commit; the mark still ends the
                 // preedit, so drop the engine's copy of it.
-                candidates_.clear();
-                candidates_visible_ = false;
-                page_ = 0;
-                window_.Hide();
-                CoreEngine::Instance().Reset(session_);
+                IpcClient::Instance().HideCandidates(session_);
+                IpcClient::Instance().Reset(session_);
             }
             if (context_) {
                 RequestEdit([&](TfEditCookie ec) { CommitInContext(ec, punctuation); });
@@ -554,9 +534,8 @@ public:
         event.action = PIME_KEY_DOWN;
         event.text = KeyText(vkey, lparam);
 
-        const Nav nav = NavForKey(vkey);
-        page_ = PageAfter(page_, nav);
-        const KeyResult result = CoreEngine::Instance().Key(session_, event);
+        // The engine owns paging: it sees the same key and redraws its strip.
+        const KeyResult result = IpcClient::Instance().Key(session_, event);
         ApplyCommands(result.commands);
         if (result.handled) *eaten = TRUE;
         return S_OK;
@@ -584,11 +563,10 @@ public:
         composition_.Reset();
         composition_range_.Reset();
         composition_text_.clear();
-        candidates_.clear();
-        candidates_visible_ = false;
-        page_ = 0;
-        window_.Hide();
-        if (session_) CoreEngine::Instance().Reset(session_);
+        if (session_) {
+            IpcClient::Instance().HideCandidates(session_);
+            IpcClient::Instance().Reset(session_);
+        }
         return S_OK;
     }
 
@@ -601,29 +579,6 @@ public:
         REFGUID guid, ITfDisplayAttributeInfo** out) override {
         return CreateDisplayAttributeInfo(guid, out);
     }
-
-    // ---- CandidateWindow::Delegate --------------------------------------
-    void OnCandidatePicked(int slot) override {
-        if (!session_ || slot < 0 || slot > 8) return;
-        KeyEvent event;
-        event.keycode = static_cast<uint32_t>('1' + slot);
-        event.action = PIME_KEY_DOWN;
-        page_ = 0;
-        const KeyResult result = CoreEngine::Instance().Key(session_, event);
-        ApplyCommands(result.commands);
-    }
-    void OnPageRequested(int direction) override {
-        if (!session_) return;
-        if (direction == 0) return;
-        const Nav nav = direction < 0 ? Nav::Prev : Nav::Next;
-        page_ = PageAfter(page_, nav);
-        KeyEvent event;
-        event.keycode = direction < 0 ? VK_PRIOR : VK_NEXT;
-        event.action = PIME_KEY_DOWN;
-        const KeyResult result = CoreEngine::Instance().Key(session_, event);
-        ApplyCommands(result.commands);
-    }
-    void OnModeToggled() override { ToggleChinese(); }
 
 private:
     ~TextServiceImpl() = default;
@@ -678,7 +633,7 @@ private:
             return false;
         }
         if (!KeyText(vkey, lparam).empty()) return true;
-        if (composition_ || candidates_visible_) return IsEditingKey(vkey);
+        if (composition_ || candidates_up_) return IsEditingKey(vkey);
         return false;
     }
 
@@ -698,23 +653,6 @@ private:
                 return true;
             default:
                 return false;
-        }
-    }
-
-    static Nav NavForKey(WPARAM vkey) {
-        switch (vkey) {
-            case VK_PRIOR:
-            case VK_UP:
-                return Nav::Prev;
-            case VK_NEXT:
-            case VK_DOWN:
-                return Nav::Next;
-            case VK_HOME:
-                return Nav::First;
-            case VK_END:
-                return Nav::Last;
-            default:
-                return Nav::None;
         }
     }
 
@@ -776,14 +714,18 @@ private:
     void StartSession() {
         if (!engine_ready_ || !context_ || session_) return;
         app_ = ProcessImageName();
-        // Modern IMEs remember the Chinese/English state per application.
-        chinese_ = LoadAppMode(app_, settings_.chinese != 0);
+        // Modern IMEs remember the Chinese/English state per application. The
+        // engine resolves it: a packaged host's own HKCU read is virtualized
+        // and would always miss.
+        bool chinese = chinese_;
+        session_ = IpcClient::Instance().OpenSession(
+            notify_hwnd_, app_, PIME_FIELD_TEXT, kHostCaps, settings_.page_size,
+            &chinese);
+        chinese_ = chinese;
         SetOpenClose(chinese_);
         UpdateLangBar();
-        session_ = CoreEngine::Instance().OpenSession(
-            notify_hwnd_, app_, PIME_FIELD_TEXT, kHostCaps, settings_.page_size);
         if (session_) {
-            CoreEngine::Instance().Focus(session_, true);
+            IpcClient::Instance().Focus(session_, true);
             WriteLog(LogLevel::Info, "tsf",
                      "session " + std::to_string(session_) + " for " +
                          ToUtf8(app_));
@@ -792,13 +734,11 @@ private:
 
     void LeaveDocument() {
         if (composition_) CancelComposition();
-        window_.Hide();
-        candidates_.clear();
-        candidates_visible_ = false;
-        page_ = 0;
+        candidates_up_ = false;
         if (session_) {
-            CoreEngine::Instance().Focus(session_, false);
-            CoreEngine::Instance().CloseSession(session_);
+            IpcClient::Instance().HideCandidates(session_);
+            IpcClient::Instance().Focus(session_, false);
+            IpcClient::Instance().CloseSession(session_);
             session_ = 0;
         }
         composition_.Reset();
@@ -992,8 +932,7 @@ private:
         std::wstring commit_text;
         bool commit = false;
         bool show = false;
-        bool hide = false;
-        std::vector<CandidateItem> items;
+        bool have_items = false;
 
         for (const UiCommand& command : commands) {
             switch (command.kind) {
@@ -1006,16 +945,13 @@ private:
                     commit = true;
                     break;
                 case UiKind::Candidates:
-                    items.reserve(command.candidates.size());
-                    for (const UiCandidate& candidate : command.candidates) {
-                        items.push_back({ToWide(candidate.text),
-                                         ToWide(candidate.comment),
-                                         ToWide(candidate.label)});
-                    }
+                    // The engine draws the strip itself; the shell only tracks
+                    // whether one is up, so it knows which keys to claim.
                     show = true;
+                    have_items = !command.candidates.empty();
                     break;
                 case UiKind::HideCandidates:
-                    hide = true;
+                    candidates_up_ = false;
                     break;
                 case UiKind::Beep:
                     MessageBeep(MB_OK);
@@ -1027,61 +963,37 @@ private:
 
         RECT caret{};
         bool have_caret = false;
-        if (commit || update_composition) {
+        if (commit || update_composition || show) {
             RequestEdit([&](TfEditCookie ec) {
                 if (commit) {
                     CommitInContext(ec, commit_text);
-                } else if (composition_text.empty()) {
-                    EndCompositionInContext(ec, false);
-                    composition_.Reset();
-                    composition_range_.Reset();
-                    composition_text_.clear();
-                } else {
-                    UpdateCompositionInContext(ec, composition_text);
+                } else if (update_composition) {
+                    if (composition_text.empty()) {
+                        EndCompositionInContext(ec, false);
+                        composition_.Reset();
+                        composition_range_.Reset();
+                        composition_text_.clear();
+                    } else {
+                        UpdateCompositionInContext(ec, composition_text);
+                    }
                 }
-                if (show && !commit) have_caret = CaretRect(ec, &caret);
+                have_caret = CaretRect(ec, &caret);
             });
-        } else if (show) {
-            RequestEdit([&](TfEditCookie ec) { have_caret = CaretRect(ec, &caret); });
         }
+        // The strip lives in the engine; tell it where the text is now.
+        if (have_caret && session_) IpcClient::Instance().SendCaret(session_, caret);
 
         if (commit) {
-            candidates_.clear();
-            candidates_visible_ = false;
-            page_ = 0;
-            window_.Hide();
+            candidates_up_ = false;
             // A commit always ends the composition here, but the chain's
             // parser only drops its buffer on space/enter/candidate commits;
             // a digit pick leaves the raw pinyin behind and the next letter
             // would compose on top of it ("zhongguo" + "a"). Reset so the
             // engine state matches the editor.
-            if (session_) CoreEngine::Instance().Reset(session_);
+            if (session_) IpcClient::Instance().Reset(session_);
             return;
         }
-        if (hide) {
-            candidates_.clear();
-            candidates_visible_ = false;
-            window_.Hide();
-            return;
-        }
-        if (!show) return;
-        if (items.empty()) {
-            candidates_.clear();
-            candidates_visible_ = false;
-            window_.Hide();
-            return;
-        }
-        if (!have_caret) {
-            POINT point{};
-            GetCursorPos(&point);
-            caret = RECT{point.x, point.y, point.x, point.y};
-        }
-        candidates_ = std::move(items);
-        candidates_visible_ = true;
-        window_.SetDark(theme_dark_);
-        window_.ShowCandidates(
-            candidates_, page_, page_ > 0,
-            candidates_.size() >= settings_.page_size, chinese_, caret);
+        if (show) candidates_up_ = have_items;
     }
 
     void ToggleChinese() {
@@ -1094,17 +1006,9 @@ private:
     void ApplyMode(bool chinese) {
         chinese_ = chinese;
         settings_.chinese = chinese_ ? 1 : 0;
-        // Persist only the per-app mode. Writing the whole settings blob from
-        // inside the host would, under MSIX registry virtualization, freeze a
-        // private copy of every value in that package, so later changes made
-        // in the settings window would never reach the app.
-        SaveAppMode(app_, chinese_);
         if (composition_) CancelComposition();
-        candidates_.clear();
-        candidates_visible_ = false;
-        page_ = 0;
-        window_.Hide();
-        if (session_) CoreEngine::Instance().Reset(session_);
+        candidates_up_ = false;
+        if (session_) IpcClient::Instance().Reset(session_);
 
         RECT caret{};
         bool have_caret = false;
@@ -1116,39 +1020,60 @@ private:
             GetCursorPos(&point);
             caret = RECT{point.x, point.y, point.x, point.y};
         }
-        window_.SetDark(theme_dark_);
-        window_.ShowModeBadge(chinese_, caret);
+        // Persist only the per-app mode, and only through the engine: a
+        // packaged host writes HKCU into a private, virtualized copy that no
+        // other process and no later session ever sees. The engine also
+        // flashes the badge at this caret.
+        if (engine_ready_) {
+            IpcClient::Instance().SaveAppMode(session_, app_, chinese_, caret);
+        }
         UpdateLangBar();
     }
 
     void OnWake() {
         if (!session_) return;
+        // The strip's 中/英 chip was clicked in the engine; it already
+        // persisted the mode, so only mirror it here.
+        bool chinese = false;
+        if (IpcClient::Instance().TakeModeChange(session_, &chinese)) {
+            chinese_ = chinese;
+            settings_.chinese = chinese_ ? 1 : 0;
+            candidates_up_ = false;
+            if (composition_) CancelComposition();
+            SetOpenClose(chinese_);
+            UpdateLangBar();
+        }
         std::vector<UiCommand> commands;
-        if (!CoreEngine::Instance().TakeAsync(session_, &commands)) return;
-        // Reset() (mode toggle) makes the engine emit a stale hide command
-        // that would erase the mode badge the same millisecond it appears.
-        if (window_.showing_badge()) return;
-        ApplyCommands(commands);
+        if (IpcClient::Instance().TakeAsync(session_, &commands)) {
+            ApplyCommands(commands);
+        }
     }
 
     void ReloadSettings() {
-        const Settings next = LoadSettings();
+        // Settings come from the engine, never from this process's HKCU: inside
+        // a packaged host (Notepad, Settings, ...) the registry read is
+        // virtualized and would never see a change made elsewhere.
+        Settings next = LoadSettings();
+        if (IpcClient::Instance().RefreshSettings()) {
+            next = IpcClient::Instance().settings();
+        }
         const bool page_changed = next.page_size != settings_.page_size;
         const bool chain_changed = next.chain != settings_.chain;
+        // Keep this app's 中/英: a page-size or theme change must not snap the
+        // session back to the global default.
+        next.chinese = chinese_ ? 1 : 0;
         settings_ = next;
-        chinese_ = settings_.chinese != 0;
-        theme_dark_ = DarkFor(settings_.theme);
-        window_.SetDark(theme_dark_);
+        WriteLog(LogLevel::Info, "tsf",
+                 "settings reloaded page=" + std::to_string(settings_.page_size) +
+                     " chain=" + ToUtf8(settings_.chain));
         if (engine_ready_ && chain_changed) {
-            CoreEngine::Instance().SwitchChain(ToUtf8(settings_.chain));
+            IpcClient::Instance().SwitchChain(ToUtf8(settings_.chain));
         }
         if (page_changed) {
             if (composition_) CancelComposition();
-            candidates_.clear();
-            candidates_visible_ = false;
-            window_.Hide();
+            candidates_up_ = false;
             if (session_) {
-                CoreEngine::Instance().CloseSession(session_);
+                IpcClient::Instance().CloseSession(session_);
                 session_ = 0;
                 StartSession();
             }
@@ -1176,17 +1101,15 @@ private:
     std::wstring composition_text_;
     bool ending_composition_ = false;
 
-    CandidateWindow window_;
-    std::vector<CandidateItem> candidates_;
-    bool candidates_visible_ = false;
-    int page_ = 0;
+    // The engine draws the strip; this only remembers whether one is up so
+    // ShouldClaim can claim editing keys while candidates are showing.
+    bool candidates_up_ = false;
 
     SessionId session_ = 0;
     bool engine_ready_ = false;
     std::wstring app_;
     Settings settings_;
     bool chinese_ = true;
-    bool theme_dark_ = false;
     bool shift_down_ = false;
     bool shift_used_ = false;
 

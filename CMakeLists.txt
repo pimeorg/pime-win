@@ -82,18 +82,34 @@ add_library(pime_tsf SHARED
     src/tsf/pime_tsf.rc
     src/tsf/register.cpp
     src/tsf/text_service.cpp
+    src/tsf/ipc_client.cpp
     src/tsf/display_attr.cpp
-    src/ui/candidate_window.cpp
 )
 target_compile_definitions(pime_tsf PRIVATE PIME_TSF_BUILD)
 target_compile_options(pime_tsf PRIVATE /utf-8 /W4 /permissive-)
 target_link_libraries(pime_tsf PRIVATE
     pime_host
     advapi32 shlwapi ole32 oleaut32 uuid user32 gdi32 shell32
-    d2d1 dwrite windowscodecs dwmapi
 )
 set_target_properties(pime_tsf PROPERTIES
     OUTPUT_NAME "pime_tsf"
+    PREFIX ""
+)
+
+# ---------------------------------------------------------------------------
+# Engine process: owns pime-core for every host, hot-updatable on its own.
+# ---------------------------------------------------------------------------
+add_executable(pime_engine WIN32
+    src/engine/engine_main.cpp
+    src/ui/candidate_window.cpp
+)
+target_compile_definitions(pime_engine PRIVATE
+    UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
+target_compile_options(pime_engine PRIVATE /utf-8 /W4 /permissive-)
+target_link_libraries(pime_engine PRIVATE
+    pime_host ole32 user32 gdi32 d2d1 dwrite windowscodecs)
+set_target_properties(pime_engine PROPERTIES
+    OUTPUT_NAME "pime_engine"
     PREFIX ""
 )
 
@@ -129,7 +145,9 @@ add_custom_target(pime_dist ALL
             $<TARGET_FILE:pime_tsf> "${PIME_DIST_DIR}"
     COMMAND "${CMAKE_COMMAND}" -E copy_if_different
             $<TARGET_FILE:pime> "${PIME_DIST_DIR}"
-    DEPENDS pime_tsf pime
+    COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+            $<TARGET_FILE:pime_engine> "${PIME_DIST_DIR}"
+    DEPENDS pime_tsf pime pime_engine
     COMMENT "Staging PIME into ${PIME_DIST_DIR}"
 )
 
