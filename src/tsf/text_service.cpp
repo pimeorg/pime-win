@@ -502,12 +502,15 @@ public:
             punctuation = full_width ? converted : ToWide(ascii);
         } else if (composition_text_.empty() && ascii == "'") {
             punctuation = full_width ? L"’" : L"'";
+        } else if (!composition_text_.empty() && IsPlainMark(ascii)) {
+            // The chain has no use for this symbol in a pinyin buffer, so end
+            // the preedit and type it; leaving it to the engine drops the key.
+            punctuation = ToWide(ascii);
         }
         const bool v_mode =
             !composition_text_.empty() &&
             (composition_text_[0] == L'v' || composition_text_[0] == L'V');
-        const bool v_operator = ascii == "." || ascii == "(" || ascii == ")";
-        if (!punctuation.empty() && !(v_mode && v_operator)) {
+        if (!punctuation.empty() && !(v_mode && IsVModeOperator(ascii))) {
             if (composition_ || candidates_up_) {
                 KeyEvent space;
                 space.keycode = VK_SPACE;
@@ -520,15 +523,28 @@ public:
                 IpcClient::Instance().HideCandidates(session_);
                 IpcClient::Instance().Reset(session_);
             }
+            bool committed = false;
             if (context_) {
-                RequestEdit([&](TfEditCookie ec) { CommitInContext(ec, punctuation); });
+                committed = SUCCEEDED(RequestEdit([&](TfEditCookie ec) {
+                    CommitInContext(ec, punctuation);
+                }));
             }
-            *eaten = TRUE;
+            // A mark that could not be delivered must not vanish with the key:
+            // let it reach the app as typed instead of swallowing it.
+            if (committed) {
+                *eaten = TRUE;
+            } else {
+                DropPreedit();
+            }
             return S_OK;
         }
 
         KeyEvent event;
         event.keycode = static_cast<uint32_t>(vkey);
+        // A packet carries the character rather than a key; give the chain the
+        // key a physical keyboard would have sent so digit selection and the
+        // keymap behave the same through a remote-control session.
+        if (vkey == VK_PACKET) event.keycode = PacketKeycode(ascii);
         event.modifiers = 0;
         if (ModifierDown(VK_SHIFT)) event.modifiers |= 1;
         if (ModifierDown(VK_CONTROL)) event.modifiers |= 2;
@@ -538,8 +554,11 @@ public:
 
         // The engine owns paging: it sees the same key and redraws its strip.
         const KeyResult result = IpcClient::Instance().Key(session_, event);
-        ApplyCommands(result.commands);
-        if (result.handled) *eaten = TRUE;
+        // Only eat the key when its output actually reached the document; a
+        // refused edit session must not leave the user with dead keys.
+        const bool applied = ApplyCommands(result.commands);
+        if (result.handled && applied) *eaten = TRUE;
+        if (!applied) DropPreedit();
         return S_OK;
     }
     STDMETHODIMP OnKeyUp(ITfContext*, WPARAM vkey, LPARAM, BOOL* eaten) override {
@@ -627,6 +646,10 @@ private:
         config_message_ = ConfigChangedMessage();
     }
 
+    // Claim a key only when OnKeyDown will really consume it. A TIP that says
+    // "mine" here and then declines in OnKeyDown loses the key in hosts that
+    // do not re-dispatch it (Scintilla, remote-control sessions), which is how
+    // digits and "/" stop working in Chinese mode.
     bool ShouldClaim(WPARAM vkey, LPARAM lparam) {
         if (vkey == VK_SHIFT) return true;
         if (!engine_ready_ || !session_ || !chinese_) return false;
@@ -634,9 +657,50 @@ private:
             ModifierDown(VK_LWIN) || ModifierDown(VK_RWIN)) {
             return false;
         }
-        if (!KeyText(vkey, lparam).empty()) return true;
-        if (composition_ || candidates_up_) return IsEditingKey(vkey);
-        return false;
+        const std::string text = KeyText(vkey, lparam);
+        if (composition_ || candidates_up_) {
+            // While a preedit is up the IME owns every key that can extend,
+            // pick, commit or cancel it, including digits and space.
+            return !text.empty() || IsEditingKey(vkey);
+        }
+        // Idle: letters start a preedit and Chinese marks are converted; a
+        // digit, space or plain symbol would only be handed back unchanged, so
+        // leave it to the app instead of claiming and dropping it.
+        return IsLetter(text) || !ChinesePunctuation(text).empty() ||
+               text == "'";
+    }
+
+    // Single ASCII letter. Everything the chain can put into a pinyin buffer.
+    static bool IsLetter(const std::string& text) {
+        if (text.size() != 1) return false;
+        const unsigned char c = static_cast<unsigned char>(text[0]);
+        return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z');
+    }
+
+    // A printable single-byte symbol that is not a letter, digit or space:
+    // punctuation the chain cannot consume, so the preedit ends and it types.
+    static bool IsPlainMark(const std::string& text) {
+        if (text.size() != 1) return false;
+        const unsigned char c = static_cast<unsigned char>(text[0]);
+        if (c <= 0x20 || c >= 0x7F) return false;
+        // The apostrophe is a syllable separator inside a preedit ("xi'an"),
+        // not a mark that ends it.
+        if (c == '\'') return false;
+        if ((c >= '0' && c <= '9') || IsLetter(text)) return false;
+        return true;
+    }
+
+    // Characters that belong to a v-mode expression ("v1/2+3"); the engine must
+    // keep them in the buffer instead of committing on them.
+    static bool IsVModeOperator(const std::string& text) {
+        if (text.size() != 1) return false;
+        switch (text[0]) {
+            case '+': case '-': case '*': case '/': case '%': case '^':
+            case '(': case ')': case '.': case '=':
+                return true;
+            default:
+                return (text[0] >= '0' && text[0] <= '9');
+        }
     }
 
     static bool IsEditingKey(WPARAM vkey) {
@@ -658,17 +722,44 @@ private:
         }
     }
 
+    // Remote-control tools and on-screen keyboards inject keys as unicode
+    // packets (VK_PACKET, the character rides in lparam) or as bare scan codes
+    // with no virtual key. ToUnicodeEx needs a virtual key, so resolve one from
+    // the scan code and take the packet character directly; otherwise those
+    // keys look like "no text", are never claimed, and the pinyin never starts.
     static std::string KeyText(WPARAM vkey, LPARAM lparam) {
+        const UINT scan = static_cast<UINT>((lparam >> 16) & 0xFF);
+        if (vkey == VK_PACKET) {
+            const wchar_t packet = static_cast<wchar_t>((lparam >> 16) & 0xFFFF);
+            if (packet < 0x20 || packet == 0x7F) return {};
+            return ToUtf8(std::wstring(1, packet));
+        }
+        if (!vkey) {
+            vkey = MapVirtualKeyW(scan, MAPVK_VSC_TO_VK_EX);
+            if (!vkey) return {};
+        }
         BYTE state[256] = {};
         if (!GetKeyboardState(state)) return {};
         wchar_t buffer[8] = {};
         const int count = ToUnicodeEx(
-            static_cast<UINT>(vkey), static_cast<UINT>((lparam >> 16) & 0xFF),
-            state, buffer, 8, 4, GetKeyboardLayout(GetCurrentThreadId()));
+            static_cast<UINT>(vkey), scan, state, buffer, 8, 4,
+            GetKeyboardLayout(GetCurrentThreadId()));
         if (count <= 0) return {};
         std::wstring text(buffer, buffer + count);
         if (text.size() == 1 && (text[0] < 0x20 || text[0] == 0x7F)) return {};
         return ToUtf8(text);
+    }
+
+    // Virtual key for a character injected as a unicode packet, so digits still
+    // select candidates and letters still go through the chain's keymap.
+    static uint32_t PacketKeycode(const std::string& text) {
+        if (text.size() != 1) return VK_PACKET;
+        const unsigned char c = static_cast<unsigned char>(text[0]);
+        if (c >= 'a' && c <= 'z') return 'A' + (c - 'a');
+        if (c >= 'A' && c <= 'Z') return c;
+        if (c >= '0' && c <= '9') return c;
+        if (c == ' ') return VK_SPACE;
+        return VK_PACKET;
     }
 
     // Full-width form of the ASCII mark, or empty when the key is not
@@ -759,6 +850,17 @@ private:
         composition_.Reset();
         composition_range_.Reset();
         composition_text_.clear();
+    }
+
+    // The host refused the edit: drop our copy of the preedit and the chain's
+    // buffer, so the next key starts clean instead of composing on top of text
+    // that never landed in the document.
+    void DropPreedit() {
+        composition_.Reset();
+        composition_range_.Reset();
+        composition_text_.clear();
+        candidates_up_ = false;
+        if (session_) IpcClient::Instance().Reset(session_);
     }
 
     void EndCompositionInContext(TfEditCookie ec, bool keep_text) {
@@ -928,7 +1030,11 @@ private:
         return true;
     }
 
-    void ApplyCommands(const std::vector<UiCommand>& commands) {
+    // Returns false when the engine asked for text output the host refused (no
+    // focus context, or a failing edit session). Callers then let the key reach
+    // the app instead of eating it: swallowing input that never lands is how a
+    // Chinese-mode session ends up with every key dead.
+    bool ApplyCommands(const std::vector<UiCommand>& commands) {
         std::wstring composition_text;
         bool update_composition = false;
         std::wstring commit_text;
@@ -965,8 +1071,9 @@ private:
 
         RECT caret{};
         bool have_caret = false;
+        bool applied = true;
         if (commit || update_composition || show) {
-            RequestEdit([&](TfEditCookie ec) {
+            const HRESULT edit = RequestEdit([&](TfEditCookie ec) {
                 if (commit) {
                     CommitInContext(ec, commit_text);
                 } else if (update_composition) {
@@ -981,6 +1088,9 @@ private:
                 }
                 have_caret = CaretRect(ec, &caret);
             });
+            // A page turn only refreshes the caret; only real text output has
+            // to land before the key counts as eaten.
+            if (commit || update_composition) applied = SUCCEEDED(edit);
         }
         // The strip lives in the engine; tell it where the text is now.
         if (have_caret && session_) IpcClient::Instance().SendCaret(session_, caret);
@@ -993,9 +1103,10 @@ private:
             // would compose on top of it ("zhongguo" + "a"). Reset so the
             // engine state matches the editor.
             if (session_) IpcClient::Instance().Reset(session_);
-            return;
+            return applied;
         }
         if (show) candidates_up_ = have_items;
+        return applied;
     }
 
     void ToggleChinese() {
