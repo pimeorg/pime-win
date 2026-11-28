@@ -1,7 +1,26 @@
 #include "resource.h"
 #include <windows.h>
 
+// The dialog below carries Chinese labels; the file itself is UTF-8.
+#pragma code_page(65001)
+
 IDI_APP ICON "pime.ico"
+
+IDD_DICT_ENTRY DIALOGEX 0, 0, 268, 136
+STYLE DS_MODALFRAME | DS_CENTER | WS_POPUP | WS_CAPTION | WS_SYSMENU
+CAPTION "编辑词条"
+FONT 9, "Segoe UI", 400, 0, 0x1
+BEGIN
+    LTEXT           "拼音码", -1, 12, 16, 56, 10
+    EDITTEXT        IDC_DICT_CODE, 72, 14, 184, 14, ES_AUTOHSCROLL
+    LTEXT           "词", -1, 12, 40, 56, 10
+    EDITTEXT        IDC_DICT_WORD, 72, 38, 184, 14, ES_AUTOHSCROLL
+    LTEXT           "权重", -1, 12, 64, 56, 10
+    EDITTEXT        IDC_DICT_WEIGHT, 72, 62, 184, 14, ES_AUTOHSCROLL | ES_NUMBER
+    LTEXT           "拼音码用空格分隔音节，例如 ni hao；权重 1-1000000。", -1, 12, 88, 244, 20
+    DEFPUSHBUTTON   "确定", IDOK, 132, 112, 60, 16
+    PUSHBUTTON      "取消", IDCANCEL, 196, 112, 60, 16
+END
 
 VS_VERSION_INFO VERSIONINFO
     FILEVERSION 1, 0, 0, 0

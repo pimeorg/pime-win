@@ -1,18 +1,29 @@
 #include "app/settings_window.h"
 
+#include <commdlg.h>
 #include <d2d1.h>
 #include <dwrite.h>
 #include <dwmapi.h>
 #include <windowsx.h>
 #include <wrl/client.h>
 
+#include <algorithm>
+#include <cstdlib>
+#include <iterator>
 #include <string>
+#include <utility>
 #include <vector>
 
+#include <pime/core.h>
+
 #include "app/resource.h"
+#include "app/rime_dict.h"
+#include "common/log.h"
 #include "common/settings.h"
+#include "common/user_dict_format.h"
 #include "common/win_util.h"
 #include "tsf/guids.h"
+#include "tsf/ipc_client.h"
 #include "tsf/register.h"
 
 using Microsoft::WRL::ComPtr;
@@ -30,15 +41,18 @@ constexpr float kWidth = 900.f;
 constexpr float kHeight = 640.f;
 constexpr float kSidebar = 224.f;
 constexpr float kMargin = 32.f;
+constexpr float kDictHeader = 36.f;
+constexpr float kDictRowHeight = 40.f;
 
-enum class Page { General, Appearance, About };
+enum class Page { General, Appearance, Dictionary, About };
 enum class Menu { None, Chain, PageSize };
 
 enum : int {
     kNone = -1,
     kNavGeneral = 1,
     kNavAppearance = 2,
-    kNavAbout = 3,
+    kNavDictionary = 3,
+    kNavAbout = 4,
     kChain = 10,
     kPageSize = 11,
     kPunctFull = 20,
@@ -46,13 +60,26 @@ enum : int {
     kThemeSystem = 30,
     kThemeLight = 31,
     kThemeDark = 32,
+    kOrientH = 33,
+    kOrientV = 34,
+    kSizeSmall = 35,
+    kSizeMid = 36,
+    kSizeLarge = 37,
     kToggle = 40,
     kApply = 50,
     kClose = 51,
     kInstall = 52,
     kUninstall = 53,
     kActivate = 54,
+    kDictAdd = 60,
+    kDictEdit = 61,
+    kDictDelete = 62,
+    kDictImport = 63,
+    kDictExport = 64,
+    kDictClear = 65,
+    kDictRefresh = 66,
     kMenuItem = 100,
+    kDictRow = 200,
 };
 
 struct Box {
@@ -65,19 +92,32 @@ struct Box {
 };
 
 struct Layout {
-    Box nav[3];
+    Box nav[4];
     Box chain;
     Box page_size;
     Box punct[2];
     Box theme[3];
+    Box orient;
+    Box size;
     Box toggle;
     Box apply;
     Box close;
     Box install;
     Box uninstall;
     Box activate;
+    Box dict_tool[7];
+    Box dict_list;
     Box menu;
     int menu_items = 0;
+};
+
+// One row of the 词库 page: display text plus the exact store values.
+struct DictRow {
+    std::wstring word;
+    std::wstring code;
+    uint32_t weight = 0;
+    std::string code_raw;
+    std::string word_raw;
 };
 
 struct Palette {
@@ -140,6 +180,13 @@ struct AppState {
 
     std::wstring status;
     bool status_ok = true;
+
+    std::vector<DictRow> dict_rows;
+    int dict_selected = -1;
+    int dict_scroll = 0;
+    bool dict_loaded = false;
+    std::wstring dict_status;
+    bool dict_status_ok = true;
 
     Tween toggle;
 
@@ -254,6 +301,34 @@ void DrawText(AppState& s, IDWriteTextFormat* format, const std::wstring& text,
     s.rt->DrawTextLayout(D2D1::Point2F(box.l, box.t), layout.Get(), brush.Get());
 }
 
+// Same as DrawText, but a line that does not fit ends in an ellipsis. Used
+// for the dictionary rows, where the text comes from the user.
+void DrawTextEllipsis(AppState& s, IDWriteTextFormat* format,
+                      const std::wstring& text, Box box,
+                      const D2D1_COLOR_F& color,
+                      DWRITE_TEXT_ALIGNMENT align =
+                          DWRITE_TEXT_ALIGNMENT_LEADING) {
+    if (text.empty() || box.W() <= 0) return;
+    ComPtr<IDWriteTextLayout> layout;
+    if (FAILED(s.dwrite->CreateTextLayout(
+            text.c_str(), static_cast<UINT32>(text.size()), format, box.W(),
+            box.H(), layout.GetAddressOf()))) {
+        return;
+    }
+    DWRITE_TRIMMING trimming{};
+    trimming.granularity = DWRITE_TRIMMING_GRANULARITY_CHARACTER;
+    ComPtr<IDWriteInlineObject> sign;
+    if (SUCCEEDED(s.dwrite->CreateEllipsisTrimmingSign(
+            layout.Get(), sign.GetAddressOf()))) {
+        layout->SetTrimming(&trimming, sign.Get());
+    }
+    layout->SetTextAlignment(align);
+    layout->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+    ComPtr<ID2D1SolidColorBrush> brush;
+    if (FAILED(s.rt->CreateSolidColorBrush(color, brush.GetAddressOf()))) return;
+    s.rt->DrawTextLayout(D2D1::Point2F(box.l, box.t), layout.Get(), brush.Get());
+}
+
 float MeasureText(AppState& s, IDWriteTextFormat* format,
                   const std::wstring& text) {
     ComPtr<IDWriteTextLayout> layout;
@@ -291,6 +366,20 @@ bool IsInstalled() {
                         nullptr, path, &size) == ERROR_SUCCESS;
 }
 
+// The order the scheme list is shown in: the common schemes first, then
+// anything else (a user-dropped chain) alphabetically at the end.
+int ChainOrder(const std::wstring& name) {
+    static const wchar_t* const kOrder[] = {
+        L"default",          L"shuangpin-xiaohe", L"shuangpin-ziranma",
+        L"shuangpin-microsoft", L"shuangpin-sogou", L"wubi86",
+        L"cangjie",          L"english",
+    };
+    for (int i = 0; i < static_cast<int>(std::size(kOrder)); ++i) {
+        if (name == kOrder[i]) return i;
+    }
+    return static_cast<int>(std::size(kOrder));
+}
+
 std::vector<std::wstring> ListChains() {
     std::vector<std::wstring> names;
     const std::wstring pattern = PathJoin(
@@ -305,6 +394,12 @@ std::vector<std::wstring> ListChains() {
         names.push_back(name);
     } while (FindNextFileW(find, &data));
     FindClose(find);
+    std::sort(names.begin(), names.end(), [](const std::wstring& a,
+                                             const std::wstring& b) {
+        const int oa = ChainOrder(a);
+        const int ob = ChainOrder(b);
+        return oa != ob ? oa < ob : a < b;
+    });
     return names;
 }
 
@@ -313,6 +408,21 @@ std::wstring ChainName(const std::wstring& file) {
     if (name.size() > 5 && name.substr(name.size() - 5) == L".cbor") {
         name.resize(name.size() - 5);
     }
+    return name;
+}
+
+// What the dropdown shows. The file stem is the stable identity; this is only
+// the human-readable label.
+std::wstring ChainLabel(const std::wstring& file) {
+    const std::wstring name = ChainName(file);
+    if (name == L"default") return L"全拼";
+    if (name == L"shuangpin-xiaohe") return L"双拼 · 小鹤";
+    if (name == L"shuangpin-ziranma") return L"双拼 · 自然码";
+    if (name == L"shuangpin-microsoft") return L"双拼 · 微软";
+    if (name == L"shuangpin-sogou") return L"双拼 · 搜狗";
+    if (name == L"wubi86") return L"五笔 86";
+    if (name == L"cangjie") return L"仓颉";
+    if (name == L"english") return L"英文补全";
     return name;
 }
 
@@ -332,7 +442,9 @@ int PageIndex(const AppState& s) {
 bool SameSettings(const Settings& a, const Settings& b) {
     return a.chain == b.chain && a.theme == b.theme &&
            a.page_size == b.page_size && a.chinese == b.chinese &&
-           a.punctuation == b.punctuation;
+           a.punctuation == b.punctuation &&
+           a.candidate_vertical == b.candidate_vertical &&
+           a.candidate_font == b.candidate_font;
 }
 
 bool Dirty(const AppState& s) { return !SameSettings(s.settings, s.saved); }
@@ -391,7 +503,7 @@ void BuildLayout(AppState& s) {
     const float x0 = kSidebar + kMargin;
     const float x1 = w - kMargin;
 
-    for (int i = 0; i < 3; ++i) {
+    for (int i = 0; i < 4; ++i) {
         l.nav[i] = Box{16.f, 116.f + i * 52.f, kSidebar - 16.f,
                        156.f + i * 52.f};
     }
@@ -428,6 +540,20 @@ void BuildLayout(AppState& s) {
                              left + i * (tile_w + gap) + tile_w,
                              card_top + 148.f};
         }
+        const float card2_top = 280.f;
+        l.orient = Box{right - 220.f, card2_top + 122.f, right,
+                       card2_top + 158.f};
+        l.size = Box{right - 220.f, card2_top + 178.f, right,
+                     card2_top + 214.f};
+    } else if (s.page == Page::Dictionary) {
+        constexpr int kTools = 7;
+        constexpr float kGap = 8.f;
+        const float width = (x1 - x0 - kGap * (kTools - 1)) / kTools;
+        for (int i = 0; i < kTools; ++i) {
+            const float left = x0 + i * (width + kGap);
+            l.dict_tool[i] = Box{left, 96.f, left + width, 132.f};
+        }
+        l.dict_list = Box{x0, 144.f, x1, h - 104.f};
     } else {
         const float card_top = 338.f;
         l.install = Box{x0 + 20.f, card_top + 76.f, x0 + 168.f,
@@ -460,6 +586,15 @@ void BuildLayout(AppState& s) {
 
 // ---- hit testing -----------------------------------------------------------
 
+float DictRowsTop(const AppState& s) {
+    return s.layout.dict_list.t + kDictHeader;
+}
+
+int DictVisibleRows(const AppState& s) {
+    const float height = s.layout.dict_list.b - DictRowsTop(s);
+    return height <= 0 ? 0 : static_cast<int>(height / kDictRowHeight);
+}
+
 int HitTest(const AppState& s, float x, float y) {
     if (s.menu != Menu::None) {
         for (int i = 0; i < s.layout.menu_items; ++i) {
@@ -467,7 +602,7 @@ int HitTest(const AppState& s, float x, float y) {
         }
         return kNone;
     }
-    for (int i = 0; i < 3; ++i) {
+    for (int i = 0; i < 4; ++i) {
         if (s.layout.nav[i].Contains(x, y)) return kNavGeneral + i;
     }
     if (s.page == Page::General) {
@@ -479,6 +614,26 @@ int HitTest(const AppState& s, float x, float y) {
     } else if (s.page == Page::Appearance) {
         for (int i = 0; i < 3; ++i) {
             if (s.layout.theme[i].Contains(x, y)) return kThemeSystem + i;
+        }
+        if (s.layout.orient.Contains(x, y)) {
+            const float seg = (x - s.layout.orient.l) / (s.layout.orient.W() / 2.f);
+            return kOrientH + (seg >= 1.f ? 1 : 0);
+        }
+        if (s.layout.size.Contains(x, y)) {
+            const float seg = (x - s.layout.size.l) / (s.layout.size.W() / 3.f);
+            return kSizeSmall + std::clamp(static_cast<int>(seg), 0, 2);
+        }
+    } else if (s.page == Page::Dictionary) {
+        for (int i = 0; i < 7; ++i) {
+            if (s.layout.dict_tool[i].Contains(x, y)) return kDictAdd + i;
+        }
+        const float top = DictRowsTop(s);
+        if (y >= top && y < s.layout.dict_list.b) {
+            const int row =
+                s.dict_scroll + static_cast<int>((y - top) / kDictRowHeight);
+            if (row >= 0 && row < static_cast<int>(s.dict_rows.size())) {
+                return kDictRow + row;
+            }
         }
     } else {
         if (s.layout.install.Contains(x, y)) return kInstall;
@@ -589,10 +744,11 @@ void DrawSidebar(AppState& s) {
     DrawText(s, s.f_small.Get(), L"Windows 输入法",
              Box{72.f, 46.f, kSidebar - 12.f, 64.f}, p.secondary);
 
-    const Page pages[3] = {Page::General, Page::Appearance, Page::About};
-    const wchar_t* names[3] = {L"常规", L"外观", L"关于"};
-    const int ids[3] = {kNavGeneral, kNavAppearance, kNavAbout};
-    for (int i = 0; i < 3; ++i) {
+    const Page pages[4] = {Page::General, Page::Appearance, Page::Dictionary,
+                           Page::About};
+    const wchar_t* names[4] = {L"常规", L"外观", L"词库", L"关于"};
+    const int ids[4] = {kNavGeneral, kNavAppearance, kNavDictionary, kNavAbout};
+    for (int i = 0; i < 4; ++i) {
         const Box& b = s.layout.nav[i];
         const bool selected = s.page == pages[i];
         if (selected) {
@@ -642,8 +798,8 @@ void DrawGeneralPage(AppState& s) {
 
     DrawRowLabel(s, card1, 110.f, L"输入方案", L"选择 assets/chains 目录中的插件链");
     DrawSelect(s, s.layout.chain,
-               s.chains.empty() ? ChainName(s.settings.chain)
-                                : s.chains[ChainIndex(s)],
+               ChainLabel(s.chains.empty() ? s.settings.chain
+                                           : s.chains[ChainIndex(s)]),
                kChain, s.menu == Menu::Chain);
     DrawLine(s, card1.l + 20.f, 168.f, card1.r - 20.f, 168.f, p.border, 1.f);
 
@@ -796,15 +952,26 @@ void DrawAppearancePage(AppState& s) {
     DrawThemeTile(s, 1, L"浅色", kThemeLight);
     DrawThemeTile(s, 2, L"深色", kThemeDark);
 
-    const Box card2{x0, 280.f, x1, 420.f};
+    const Box card2{x0, 280.f, x1, 510.f};
     DrawCard(s, card2);
     DrawText(s, s.f_section.Get(), L"候选窗口",
              Box{card2.l + 20.f, card2.t + 14.f, card2.r - 20.f,
                  card2.t + 34.f},
              p.text);
     DrawCandidatePreview(s, card2);
-    DrawText(s, s.f_small.Get(), L"候选条与模式气泡跟随上面的主题设置。",
-             Box{card2.l + 20.f, 392.f, card2.r - 20.f, 408.f}, p.secondary);
+
+    static const wchar_t* const kOrientLabels[] = {L"横排", L"竖排"};
+    static const wchar_t* const kSizeLabels[] = {L"小", L"中", L"大"};
+    DrawRowLabel(s, card2, card2.t + 122.f, L"排列方式",
+                 L"单行横排，或多行竖排");
+    DrawSegmented(s, s.layout.orient, kOrientLabels, 2,
+                  s.settings.candidate_vertical ? 1 : 0, kOrientH);
+    DrawRowLabel(s, card2, card2.t + 178.f, L"候选字号",
+                 L"候选文字的显示大小");
+    const int size_index = s.settings.candidate_font <= 14
+                               ? 0
+                               : (s.settings.candidate_font <= 17 ? 1 : 2);
+    DrawSegmented(s, s.layout.size, kSizeLabels, 3, size_index, kSizeSmall);
 }
 
 void DrawAboutPage(AppState& s) {
@@ -825,7 +992,7 @@ void DrawAboutPage(AppState& s) {
     const Row rows[] = {
         {L"版本", kVersion},
         {L"输入法内核", L"pime-core（WAMR 插件运行时）"},
-        {L"输入方案", ChainName(s.settings.chain)},
+        {L"输入方案", ChainLabel(s.settings.chain)},
         {L"日志目录", DataDirectory()},
         {L"许可证", L"Apache License 2.0"},
     };
@@ -864,6 +1031,101 @@ void DrawAboutPage(AppState& s) {
     DrawButton(s, s.layout.uninstall, L"卸载", kUninstall, ButtonKind::Danger);
     DrawButton(s, s.layout.activate, L"切换到 PIME", kActivate,
                ButtonKind::Primary);
+}
+
+void DrawDictionaryPage(AppState& s) {
+    const Palette p = Pal(s.system_dark);
+    DrawButton(s, s.layout.dict_tool[0], L"添加", kDictAdd,
+               ButtonKind::Primary);
+    DrawButton(s, s.layout.dict_tool[1], L"编辑", kDictEdit,
+               ButtonKind::Secondary);
+    DrawButton(s, s.layout.dict_tool[2], L"删除", kDictDelete,
+               ButtonKind::Secondary);
+    DrawButton(s, s.layout.dict_tool[3], L"导入…", kDictImport,
+               ButtonKind::Secondary);
+    DrawButton(s, s.layout.dict_tool[4], L"导出…", kDictExport,
+               ButtonKind::Secondary);
+    DrawButton(s, s.layout.dict_tool[5], L"清空", kDictClear,
+               ButtonKind::Danger);
+    DrawButton(s, s.layout.dict_tool[6], L"刷新", kDictRefresh,
+               ButtonKind::Secondary);
+
+    const Box& card = s.layout.dict_list;
+    DrawCard(s, card);
+    const float top = DictRowsTop(s);
+    // Columns scale with the card: the window is not always 900 DIP wide.
+    const float inner = card.W() - 44.f;
+    const float word_right = card.l + 20.f + inner * 0.42f;
+    const float code_right = card.l + 20.f + inner * 0.78f;
+    DrawText(s, s.f_small.Get(), L"词",
+             Box{card.l + 20.f, card.t, word_right - 4.f, top}, p.secondary);
+    DrawText(s, s.f_small.Get(), L"拼音码",
+             Box{word_right, card.t, code_right - 4.f, top}, p.secondary);
+    DrawText(s, s.f_small.Get(), L"权重",
+             Box{code_right, card.t, card.r - 24.f, top}, p.secondary,
+             DWRITE_TEXT_ALIGNMENT_TRAILING);
+    DrawLine(s, card.l + 20.f, top, card.r - 20.f, top, p.border, 1.f);
+
+    const int visible = DictVisibleRows(s);
+    s.rt->PushAxisAlignedClip(D2D1::RectF(card.l, top, card.r, card.b),
+                              D2D1_ANTIALIAS_MODE_ALIASED);
+    const int last = std::min(static_cast<int>(s.dict_rows.size()),
+                              s.dict_scroll + visible);
+    for (int i = s.dict_scroll; i < last; ++i) {
+        const DictRow& row = s.dict_rows[i];
+        const float y = top + (i - s.dict_scroll) * kDictRowHeight;
+        const Box box{card.l, y, card.r, y + kDictRowHeight};
+        if (i == s.dict_selected) {
+            FillBox(s, Box{card.l + 8.f, y + 1.f, card.r - 8.f,
+                           y + kDictRowHeight - 1.f},
+                    7.f, p.accent_soft);
+        } else if (Hover(s, box)) {
+            FillBox(s, Box{card.l + 8.f, y + 1.f, card.r - 8.f,
+                           y + kDictRowHeight - 1.f},
+                    7.f, p.hover);
+        }
+        DrawTextEllipsis(s, s.f_value.Get(), row.word,
+                         Box{card.l + 20.f, y, word_right - 4.f,
+                             y + kDictRowHeight},
+                         p.text);
+        DrawTextEllipsis(s, s.f_value.Get(), row.code,
+                         Box{word_right, y, code_right - 4.f,
+                             y + kDictRowHeight},
+                         p.secondary);
+        DrawText(s, s.f_value.Get(), std::to_wstring(row.weight),
+                 Box{code_right, y, card.r - 24.f, y + kDictRowHeight},
+                 p.secondary, DWRITE_TEXT_ALIGNMENT_TRAILING);
+    }
+    s.rt->PopAxisAlignedClip();
+
+    const int total = static_cast<int>(s.dict_rows.size());
+    if (visible > 0 && total > visible) {
+        const float track_top = top + 4.f;
+        const float track_bottom = card.b - 8.f;
+        const float track_height = track_bottom - track_top;
+        const float thumb_height =
+            std::max(24.f, track_height * visible / static_cast<float>(total));
+        const float progress = static_cast<float>(s.dict_scroll) /
+                               static_cast<float>(total - visible);
+        const float thumb_top =
+            track_top + (track_height - thumb_height) * progress;
+        FillBox(s, Box{card.r - 10.f, track_top, card.r - 4.f, track_bottom},
+                3.f, p.track);
+        FillBox(s, Box{card.r - 10.f, thumb_top, card.r - 4.f,
+                       thumb_top + thumb_height},
+                3.f, p.secondary);
+    }
+
+    if (s.dict_loaded && s.dict_rows.empty()) {
+        DrawText(s, s.f_desc.Get(),
+                 L"还没有词条。可以用「添加」自建，或从 Rime 词库导入。",
+                 Box{card.l + 20.f, top + 12.f, card.r - 20.f, top + 40.f},
+                 p.secondary);
+    }
+
+    DrawText(s, s.f_desc.Get(), s.dict_status,
+             Box{card.l + 2.f, card.b + 6.f, card.r, card.b + 28.f},
+             s.dict_status_ok ? p.secondary : p.danger);
 }
 
 void DrawFooter(AppState& s) {
@@ -908,7 +1170,7 @@ void DrawMenu(AppState& s) {
             const bool hot = s.mouse_in && item.Contains(s.mx, s.my);
             if (hot) FillBox(s, item, 6.f, p.accent_soft);
             const bool current = static_cast<int>(i) == selected;
-            DrawText(s, s.f_value.Get(), s.chains[i],
+            DrawText(s, s.f_value.Get(), ChainLabel(s.chains[i]),
                      Box{item.l + 12.f, item.t, item.r - 32.f, item.b},
                      current ? p.accent : p.text);
             if (current) {
@@ -950,6 +1212,11 @@ void Draw(AppState& s) {
             DrawPageHeader(s, L"外观", L"主题与候选窗口样式");
             DrawAppearancePage(s);
             break;
+        case Page::Dictionary:
+            DrawPageHeader(s, L"词库",
+                           L"自造词与学习到的词；支持导入导出 Rime 词库");
+            DrawDictionaryPage(s);
+            break;
         case Page::About:
             DrawPageHeader(s, L"关于", L"安装状态与应用信息");
             DrawAboutPage(s);
@@ -976,15 +1243,378 @@ void ApplySettings(AppState& s, HWND window) {
     Invalidate(s, window);
 }
 
+// ---- user dictionary -------------------------------------------------------
+
+std::wstring DictStatusText(int status) {
+    switch (status) {
+        case PIME_FULL:
+            return L"词库已满，请先删除或清空部分词条";
+        case PIME_DENIED:
+            return L"无法访问词库存储（store key 不可用）";
+        case PIME_NOT_FOUND:
+            return L"词条不存在";
+        case PIME_CLOSED:
+            return L"无法连接输入法引擎";
+        default:
+            return L"输入法引擎返回错误 " + std::to_wstring(status);
+    }
+}
+
+bool EnsureEngine(AppState& s) {
+    IpcClient& ipc = IpcClient::Instance();
+    if (ipc.ready()) return true;
+    const std::wstring exe =
+        PathJoin(ModuleDirectory(nullptr), L"pime_engine.exe");
+    if (!ipc.Start(exe)) {
+        s.dict_status = L"无法连接输入法引擎";
+        s.dict_status_ok = false;
+        return false;
+    }
+    return true;
+}
+
+// Fetches the whole dictionary. `note` prefixes the result line when this
+// follows an edit; empty means this is a plain load.
+void LoadDict(AppState& s, HWND window, const std::wstring& note = {}) {
+    s.dict_rows.clear();
+    s.dict_selected = -1;
+    s.dict_scroll = 0;
+    s.dict_loaded = false;
+    if (!EnsureEngine(s)) {
+        Invalidate(s, window);
+        return;
+    }
+
+    uint32_t offset = 0;
+    for (;;) {
+        UserDictReply page;
+        if (!IpcClient::Instance().UserDictList(offset, 5000, &page)) {
+            s.dict_status = L"无法连接输入法引擎";
+            s.dict_status_ok = false;
+            Invalidate(s, window);
+            return;
+        }
+        if (page.status != PIME_OK) {
+            s.dict_status = DictStatusText(page.status);
+            s.dict_status_ok = false;
+            Invalidate(s, window);
+            return;
+        }
+        for (const UserWord& word : page.words) {
+            DictRow row;
+            row.word = ToWide(word.word);
+            row.code = ToWide(DisplayUserCode(word.code));
+            row.weight = word.weight;
+            row.code_raw = word.code;
+            row.word_raw = word.word;
+            s.dict_rows.push_back(std::move(row));
+        }
+        offset += static_cast<uint32_t>(page.words.size());
+        if (page.words.empty() || offset >= page.total) break;
+    }
+
+    s.dict_loaded = true;
+    const std::wstring count =
+        L"共 " + std::to_wstring(s.dict_rows.size()) + L" 条";
+    s.dict_status = note.empty() ? count : note + L"（" + count + L"）";
+    s.dict_status_ok = true;
+    Invalidate(s, window);
+}
+
+struct DictEntry {
+    std::wstring code;  // display form, syllables separated by spaces
+    std::wstring word;
+    uint32_t weight = 100;
+    UserWord value;  // normalized result, valid when the dialog returns IDOK
+};
+
+INT_PTR CALLBACK DictEntryProc(HWND dialog, UINT message, WPARAM wparam,
+                               LPARAM lparam) {
+    auto* entry = reinterpret_cast<DictEntry*>(
+        GetWindowLongPtrW(dialog, GWLP_USERDATA));
+    if (message == WM_INITDIALOG) {
+        entry = reinterpret_cast<DictEntry*>(lparam);
+        SetWindowLongPtrW(dialog, GWLP_USERDATA, lparam);
+        SetDlgItemTextW(dialog, IDC_DICT_CODE, entry->code.c_str());
+        SetDlgItemTextW(dialog, IDC_DICT_WORD, entry->word.c_str());
+        SetDlgItemTextW(dialog, IDC_DICT_WEIGHT,
+                        std::to_wstring(entry->weight).c_str());
+        SendDlgItemMessageW(dialog, IDC_DICT_CODE, EM_SETSEL, 0, -1);
+        SetFocus(GetDlgItem(dialog, IDC_DICT_CODE));
+        return FALSE;
+    }
+    if (message != WM_COMMAND) return FALSE;
+    if (LOWORD(wparam) == IDCANCEL) {
+        EndDialog(dialog, IDCANCEL);
+        return TRUE;
+    }
+    if (LOWORD(wparam) != IDOK) return FALSE;
+
+    wchar_t code[256] = {};
+    wchar_t word[1024] = {};
+    wchar_t weight[32] = {};
+    GetDlgItemTextW(dialog, IDC_DICT_CODE, code, 256);
+    GetDlgItemTextW(dialog, IDC_DICT_WORD, word, 1024);
+    GetDlgItemTextW(dialog, IDC_DICT_WEIGHT, weight, 32);
+
+    UserWord value;
+    if (!NormalizeUserCode(ToUtf8(code), &value.code)) {
+        MessageBoxW(dialog,
+                    L"拼音码不能为空，只能包含字母和撇号（音节之间可加空格）。",
+                    L"词条无效", MB_ICONWARNING);
+        return TRUE;
+    }
+    value.word = ToUtf8(word);
+    value.weight = static_cast<uint32_t>(std::wcstoull(weight, nullptr, 10));
+    std::string error;
+    if (!ValidateUserWord(value, &error)) {
+        MessageBoxW(dialog, ToWide(error).c_str(), L"词条无效",
+                    MB_ICONWARNING);
+        return TRUE;
+    }
+    entry->value = std::move(value);
+    EndDialog(dialog, IDOK);
+    return TRUE;
+}
+
+bool ShowDictEntryDialog(HWND window, DictEntry* entry) {
+    const INT_PTR result =
+        DialogBoxParamW(GetModuleHandleW(nullptr), MAKEINTRESOURCEW(IDD_DICT_ENTRY),
+                        window, DictEntryProc, reinterpret_cast<LPARAM>(entry));
+    WriteLog(LogLevel::Info, "dict",
+             "dialog result " + std::to_string(result) + " err " +
+                 std::to_string(GetLastError()));
+    return result == IDOK;
+}
+
+bool ApplyDictWord(AppState& s, const UserWord& word, std::wstring* message) {
+    int status = PIME_OK;
+    if (!IpcClient::Instance().UserDictSet({word}, &status)) {
+        *message = L"无法连接输入法引擎";
+        s.dict_status_ok = false;
+        return false;
+    }
+    if (status != PIME_OK) {
+        *message = DictStatusText(status);
+        s.dict_status_ok = false;
+        return false;
+    }
+    return true;
+}
+
+void AddDictEntry(AppState& s, HWND window) {
+    DictEntry entry;
+    if (!ShowDictEntryDialog(window, &entry)) return;
+    std::wstring message = L"已添加「" + ToWide(entry.value.word) + L"」";
+    ApplyDictWord(s, entry.value, &message);
+    LoadDict(s, window, message);
+}
+
+void EditDictEntry(AppState& s, HWND window) {
+    if (s.dict_selected < 0 ||
+        s.dict_selected >= static_cast<int>(s.dict_rows.size())) {
+        s.dict_status = L"请先在列表中选择一条词条";
+        s.dict_status_ok = false;
+        Invalidate(s, window);
+        return;
+    }
+    const DictRow row = s.dict_rows[s.dict_selected];
+    DictEntry entry;
+    entry.code = row.code;
+    entry.word = row.word;
+    entry.weight = row.weight;
+    if (!ShowDictEntryDialog(window, &entry)) return;
+
+    std::wstring message = L"已保存词条";
+    const bool applied = ApplyDictWord(s, entry.value, &message);
+    // The key encodes code and word, so a changed pair is a new entry and the
+    // old one has to go. Write first: a failed delete only leaves a duplicate.
+    if (applied && (entry.value.code != row.code_raw ||
+                    entry.value.word != row.word_raw)) {
+        int removed = PIME_OK;
+        if (!IpcClient::Instance().UserDictDelete(row.code_raw, row.word_raw,
+                                                  &removed)) {
+            message = L"无法连接输入法引擎";
+        } else if (removed != PIME_OK && removed != PIME_NOT_FOUND) {
+            message = DictStatusText(removed);
+        }
+    }
+    LoadDict(s, window, message);
+}
+
+void DeleteDictEntry(AppState& s, HWND window) {
+    if (s.dict_selected < 0 ||
+        s.dict_selected >= static_cast<int>(s.dict_rows.size())) {
+        s.dict_status = L"请先在列表中选择一条词条";
+        s.dict_status_ok = false;
+        Invalidate(s, window);
+        return;
+    }
+    const DictRow row = s.dict_rows[s.dict_selected];
+    const std::wstring question = L"删除词条「" + row.word + L"」？";
+    if (MessageBoxW(window, question.c_str(), L"删除词条",
+                    MB_ICONQUESTION | MB_YESNO) != IDYES) {
+        return;
+    }
+    int status = PIME_OK;
+    std::wstring message = L"已删除词条";
+    if (!IpcClient::Instance().UserDictDelete(row.code_raw, row.word_raw,
+                                              &status)) {
+        message = L"无法连接输入法引擎";
+    } else if (status != PIME_OK && status != PIME_NOT_FOUND) {
+        message = DictStatusText(status);
+    }
+    LoadDict(s, window, message);
+}
+
+void ClearDict(AppState& s, HWND window) {
+    if (MessageBoxW(window,
+                    L"清空整个词库？这也会删除自动学习到的词，且无法撤销。",
+                    L"清空词库", MB_ICONWARNING | MB_YESNO) != IDYES) {
+        return;
+    }
+    int status = PIME_OK;
+    std::wstring message = L"词库已清空";
+    if (!IpcClient::Instance().UserDictClear(&status)) {
+        message = L"无法连接输入法引擎";
+    } else if (status != PIME_OK) {
+        message = DictStatusText(status);
+    }
+    LoadDict(s, window, message);
+}
+
+void ImportDict(AppState& s, HWND window) {
+    if (!EnsureEngine(s)) {
+        Invalidate(s, window);
+        return;
+    }
+    wchar_t path[1024] = {};
+    OPENFILENAMEW dialog{};
+    dialog.lStructSize = sizeof(dialog);
+    dialog.hwndOwner = window;
+    dialog.lpstrFilter =
+        L"Rime 词库 (*.yaml;*.txt)\0*.yaml;*.txt\0所有文件 (*.*)\0*.*\0";
+    dialog.lpstrFile = path;
+    dialog.nMaxFile = 1024;
+    dialog.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR;
+    dialog.lpstrTitle = L"导入词库";
+    if (!GetOpenFileNameW(&dialog)) return;
+
+    const RimeDictReadResult read = ReadRimeDict(path);
+    if (!read.ok) {
+        s.dict_status = L"导入失败：" + ToWide(read.error);
+        s.dict_status_ok = false;
+        Invalidate(s, window);
+        return;
+    }
+    if (read.words.empty()) {
+        s.dict_status = L"文件中没有可导入的词条";
+        s.dict_status_ok = false;
+        Invalidate(s, window);
+        return;
+    }
+
+    constexpr size_t kBatch = 500;
+    uint32_t imported = 0;
+    int status = PIME_OK;
+    for (size_t start = 0; start < read.words.size(); start += kBatch) {
+        const size_t end = std::min(read.words.size(), start + kBatch);
+        const std::vector<UserWord> batch(read.words.begin() + start,
+                                          read.words.begin() + end);
+        if (!IpcClient::Instance().UserDictSet(batch, &status)) {
+            status = PIME_CLOSED;
+            break;
+        }
+        if (status != PIME_OK) break;
+        imported += static_cast<uint32_t>(batch.size());
+    }
+
+    std::wstring message =
+        L"已导入 " + std::to_wstring(imported) + L" 条";
+    if (read.skipped) {
+        message += L"，跳过 " + std::to_wstring(read.skipped) + L" 条";
+    }
+    if (status != PIME_OK) message += L"；" + DictStatusText(status);
+    LoadDict(s, window, message);
+}
+
+void ExportDict(AppState& s, HWND window) {
+    if (!s.dict_loaded) {
+        s.dict_status = L"词库尚未载入，请先刷新";
+        s.dict_status_ok = false;
+        Invalidate(s, window);
+        return;
+    }
+    wchar_t path[1024] = {};
+    lstrcpynW(path, L"pime_user.dict.yaml", 1024);
+    OPENFILENAMEW dialog{};
+    dialog.lStructSize = sizeof(dialog);
+    dialog.hwndOwner = window;
+    dialog.lpstrFilter = L"Rime 词库 (*.dict.yaml)\0*.dict.yaml\0文本文件 (*.txt)\0*.txt\0";
+    dialog.lpstrDefExt = L"yaml";
+    dialog.lpstrFile = path;
+    dialog.nMaxFile = 1024;
+    dialog.Flags = OFN_OVERWRITEPROMPT | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR;
+    dialog.lpstrTitle = L"导出词库";
+    if (!GetSaveFileNameW(&dialog)) return;
+
+    std::wstring name = path;
+    std::transform(name.begin(), name.end(), name.begin(), towlower);
+    const bool plain =
+        name.size() > 4 && name.substr(name.size() - 4) == L".txt";
+
+    std::vector<UserWord> words;
+    words.reserve(s.dict_rows.size());
+    for (const DictRow& row : s.dict_rows) {
+        words.push_back(UserWord{row.code_raw, row.word_raw, row.weight});
+    }
+    std::string error;
+    if (!WriteRimeDict(path, words, plain, &error)) {
+        s.dict_status = L"导出失败：" + ToWide(error);
+        s.dict_status_ok = false;
+        Invalidate(s, window);
+        return;
+    }
+    s.dict_status = L"已导出 " + std::to_wstring(words.size()) + L" 条";
+    s.dict_status_ok = true;
+    Invalidate(s, window);
+}
+
 void ActivateById(AppState& s, HWND window, int id) {
     switch (id) {
         case kNavGeneral:
         case kNavAppearance:
+        case kNavDictionary:
         case kNavAbout:
             s.page = static_cast<Page>(id - kNavGeneral);
             s.menu = Menu::None;
             s.focus = kNone;
+            if (s.page == Page::Dictionary && !s.dict_loaded) {
+                LoadDict(s, window);
+                return;
+            }
             Invalidate(s, window);
+            return;
+        case kDictAdd:
+            AddDictEntry(s, window);
+            return;
+        case kDictEdit:
+            EditDictEntry(s, window);
+            return;
+        case kDictDelete:
+            DeleteDictEntry(s, window);
+            return;
+        case kDictImport:
+            ImportDict(s, window);
+            return;
+        case kDictExport:
+            ExportDict(s, window);
+            return;
+        case kDictClear:
+            ClearDict(s, window);
+            return;
+        case kDictRefresh:
+            LoadDict(s, window);
             return;
         case kChain:
             s.menu = s.menu == Menu::Chain ? Menu::None : Menu::Chain;
@@ -1006,6 +1636,18 @@ void ActivateById(AppState& s, HWND window, int id) {
         case kThemeLight:
         case kThemeDark:
             s.settings.theme = static_cast<uint32_t>(id - kThemeSystem);
+            Invalidate(s, window);
+            return;
+        case kOrientH:
+        case kOrientV:
+            s.settings.candidate_vertical = id == kOrientV ? 1 : 0;
+            Invalidate(s, window);
+            return;
+        case kSizeSmall:
+        case kSizeMid:
+        case kSizeLarge:
+            s.settings.candidate_font =
+                id == kSizeSmall ? 13 : (id == kSizeMid ? 16 : 19);
             Invalidate(s, window);
             return;
         case kToggle: {
@@ -1068,13 +1710,20 @@ void Click(AppState& s, HWND window, float x, float y) {
     }
     const int hit = HitTest(s, x, y);
     if (hit == kNone) return;
+    if (hit >= kDictRow) {
+        s.dict_selected = hit - kDictRow;
+        s.focus = kNone;
+        Invalidate(s, window);
+        return;
+    }
     s.focus = hit;
     s.focus_visible = false;
     ActivateById(s, window, hit);
 }
 
 std::vector<int> FocusOrder(const AppState& s) {
-    std::vector<int> order = {kNavGeneral, kNavAppearance, kNavAbout};
+    std::vector<int> order = {kNavGeneral, kNavAppearance, kNavDictionary,
+                              kNavAbout};
     if (s.page == Page::General) {
         order.push_back(kChain);
         order.push_back(kPageSize);
@@ -1085,6 +1734,13 @@ std::vector<int> FocusOrder(const AppState& s) {
         order.push_back(kThemeSystem);
         order.push_back(kThemeLight);
         order.push_back(kThemeDark);
+        order.push_back(kOrientH);
+        order.push_back(kOrientV);
+        order.push_back(kSizeSmall);
+        order.push_back(kSizeMid);
+        order.push_back(kSizeLarge);
+    } else if (s.page == Page::Dictionary) {
+        for (int id = kDictAdd; id <= kDictRefresh; ++id) order.push_back(id);
     } else {
         order.push_back(kInstall);
         order.push_back(kUninstall);
@@ -1247,6 +1903,39 @@ LRESULT CALLBACK WndProc(HWND window, UINT message, WPARAM wparam,
                   y * 96.f / static_cast<float>(s->dpi));
             return 0;
         }
+        case WM_LBUTTONDBLCLK: {
+            if (!s) break;
+            const float x = static_cast<float>(GET_X_LPARAM(lparam));
+            const float y = static_cast<float>(GET_Y_LPARAM(lparam));
+            const float dip_x = x * 96.f / static_cast<float>(s->dpi);
+            const float dip_y = y * 96.f / static_cast<float>(s->dpi);
+            const int hit = HitTest(*s, dip_x, dip_y);
+            if (hit >= kDictRow) {
+                s->dict_selected = hit - kDictRow;
+                EditDictEntry(*s, window);
+                return 0;
+            }
+            Click(*s, window, dip_x, dip_y);
+            return 0;
+        }
+        case WM_MOUSEWHEEL: {
+            if (!s || s->page != Page::Dictionary) break;
+            POINT point{GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam)};
+            ScreenToClient(window, &point);
+            if (!s->layout.dict_list.Contains(
+                    point.x * 96.f / static_cast<float>(s->dpi),
+                    point.y * 96.f / static_cast<float>(s->dpi))) {
+                break;
+            }
+            const int step = GET_WHEEL_DELTA_WPARAM(wparam) > 0 ? -3 : 3;
+            const int visible = DictVisibleRows(*s);
+            const int max_scroll = std::max(
+                0, static_cast<int>(s->dict_rows.size()) - visible);
+            s->dict_scroll =
+                std::clamp(s->dict_scroll + step, 0, max_scroll);
+            InvalidateRect(window, nullptr, FALSE);
+            return 0;
+        }
         case WM_SETCURSOR:
             if (s && LOWORD(lparam) == HTCLIENT) {
                 POINT point{};
@@ -1343,6 +2032,7 @@ int RunSettingsApp(HINSTANCE instance) {
 
     WNDCLASSEXW wc{};
     wc.cbSize = sizeof(wc);
+    wc.style = CS_DBLCLKS;
     wc.lpfnWndProc = WndProc;
     wc.hInstance = instance;
     wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);

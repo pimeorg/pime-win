@@ -1,0 +1,29 @@
+description: 仓颉词典翻译：字母码查词表，整码在前、补全在后
+id: pime-cangjie-translate
+version: 1.0.0
+abi: { major: 1, minor: 0 }
+min_core: "1.0.0"
+state_schema: 1
+store_schema: 1
+runtime: wasm
+role: translate
+platforms: [windows-x64, windows-arm64, macos-x64, macos-arm64,
+            linux-x64, linux-arm64, android-arm64, android-x64, ios-arm64, ios-x64, harmony-arm64, harmony-x64]
+entry: pime_process
+capabilities: [workspace, asset.read, output.emit]
+requires: [pime-cangjie-parse@^1.0]
+assets: [cangjie.dict]
+limits:
+  memory_mb: 24
+  instructions: 8000000
+  time_ms: 5
+  state_kb: 32
+  workspace_kb: 128
+  candidates_max: 32
+  scratch_bytes: 16384
+  max_frame_bytes: 65536
+budget: { sync_us: 100, async_ms: 20 }
+settings:
+  - { key: max_candidates, type: int, default: 8, min: 1, max: 32 }
+  - { key: completion, type: bool, default: true }
+  - { key: completion_limit, type: int, default: 24, min: 0, max: 32 }

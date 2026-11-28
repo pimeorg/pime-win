@@ -18,7 +18,6 @@ namespace {
 
 constexpr wchar_t kClassName[] = L"PimeCandidateWindow";
 constexpr UINT_PTR kBadgeTimer = 1;
-constexpr float kCardHeight = 38.0f;
 constexpr float kCardRadius = 10.0f;
 constexpr float kShadowMargin = 12.0f;
 constexpr float kChipWidth = 32.0f;
@@ -145,14 +144,7 @@ bool CandidateWindow::Create(Delegate* delegate) {
         return false;
     }
 
-    text_format_ = MakeFormat(dwrite_.Get(), L"Microsoft YaHei UI", 15.0f,
-                              DWRITE_TEXT_ALIGNMENT_LEADING);
-    label_format_ = MakeFormat(dwrite_.Get(), L"Segoe UI", 10.0f,
-                               DWRITE_TEXT_ALIGNMENT_CENTER);
-    comment_format_ = MakeFormat(dwrite_.Get(), L"Microsoft YaHei UI", 11.0f,
-                                 DWRITE_TEXT_ALIGNMENT_LEADING);
-    chip_format_ = MakeFormat(dwrite_.Get(), L"Microsoft YaHei UI", 13.0f,
-                              DWRITE_TEXT_ALIGNMENT_CENTER);
+    CreateFormats();
 
     HINSTANCE instance = nullptr;
     GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
@@ -219,6 +211,38 @@ void CandidateWindow::SetDark(bool dark) {
     if (visible_) Paint();
 }
 
+void CandidateWindow::SetStyle(bool vertical, uint32_t font_dip) {
+    font_dip = std::clamp(font_dip, 12u, 24u);
+    if (vertical == vertical_ && font_dip == font_dip_) return;
+    vertical_ = vertical;
+    font_dip_ = font_dip;
+    CreateFormats();
+    if (!visible_) return;
+    if (badge_) {
+        ShowModeBadge(chinese_, caret_);
+    } else {
+        LayoutCandidates();
+        ShowAt(caret_);
+    }
+}
+
+void CandidateWindow::CreateFormats() {
+    if (!dwrite_) return;
+    const float size = static_cast<float>(font_dip_);
+    text_format_ = MakeFormat(dwrite_.Get(), L"Microsoft YaHei UI", size,
+                              DWRITE_TEXT_ALIGNMENT_LEADING);
+    label_format_ = MakeFormat(dwrite_.Get(), L"Segoe UI",
+                               std::max(9.0f, size * 0.67f),
+                               DWRITE_TEXT_ALIGNMENT_CENTER);
+    comment_format_ = MakeFormat(dwrite_.Get(), L"Microsoft YaHei UI",
+                                 std::max(10.0f, size * 0.73f),
+                                 DWRITE_TEXT_ALIGNMENT_LEADING);
+    chip_format_ = MakeFormat(dwrite_.Get(), L"Microsoft YaHei UI",
+                              std::max(11.0f, size * 0.87f),
+                              DWRITE_TEXT_ALIGNMENT_CENTER);
+    row_height_ = std::max(34.0f, std::ceil(size * 1.9f));
+}
+
 void CandidateWindow::ShowCandidates(const std::vector<CandidateItem>& items,
                                      int page, bool has_prev, bool has_next,
                                      const RECT& caret) {
@@ -233,13 +257,17 @@ void CandidateWindow::ShowCandidates(const std::vector<CandidateItem>& items,
         badge_timer_ = 0;
     }
 
+    raw_items_ = items;
+    LayoutCandidates();
+    ShowAt(caret);
+}
+
+void CandidateWindow::LayoutCandidates() {
     items_.clear();
     hits_.clear();
     const float top = kShadowMargin;
-    const float bottom = kShadowMargin + kCardHeight;
-    float x = kShadowMargin + 8.0f;
-
-    for (const auto& item : items) {
+    const float row = row_height_;
+    auto item_width = [&](const CandidateItem& item) {
         const float label_width =
             item.label.empty()
                 ? 0.0f
@@ -252,36 +280,84 @@ void CandidateWindow::ShowCandidates(const std::vector<CandidateItem>& items,
         float width = 5.0f + label_width + (item.label.empty() ? 0.0f : 3.0f) +
                       text_width + 5.0f;
         if (!item.comment.empty()) width += 6.0f + comment_width;
-        ItemBox box;
-        box.rect = D2D1::RectF(x, top + 3.0f, x + width, bottom - 3.0f);
-        box.item = item;
-        items_.push_back(std::move(box));
-        x += width + 2.0f;
+        return width;
+    };
+
+    if (vertical_) {
+        float widest = 0.0f;
+        for (const auto& item : raw_items_) {
+            widest = std::max(widest, item_width(item));
+        }
+        const bool footer = has_prev_ || has_next_;
+        const float footer_height = footer ? std::max(24.0f, row * 0.7f) : 0.0f;
+        float y = top + 4.0f;
+        for (const auto& item : raw_items_) {
+            ItemBox box;
+            box.rect = D2D1::RectF(kShadowMargin + 8.0f, y + 1.0f,
+                                   kShadowMargin + 8.0f + widest, y + row - 1.0f);
+            box.item = item;
+            items_.push_back(std::move(box));
+            y += row;
+        }
+        card_width_ = widest + 16.0f;
+        card_height_ = (y - top) + footer_height + 4.0f;
+        if (footer) {
+            // Page arrows sit in a footer row at the bottom right.
+            const float hit_top = y + 2.0f;
+            const float hit_bottom = y + footer_height - 2.0f;
+            float right = kShadowMargin + card_width_ - 8.0f;
+            if (has_next_) {
+                HitBox hit;
+                hit.rect = D2D1::RectF(right - kArrowWidth, hit_top, right,
+                                       hit_bottom);
+                hit.kind = -1;
+                hits_.push_back(hit);
+                right -= kArrowWidth;
+            }
+            if (has_prev_) {
+                HitBox hit;
+                hit.rect = D2D1::RectF(right - kArrowWidth, hit_top, right,
+                                       hit_bottom);
+                hit.kind = -2;
+                hits_.push_back(hit);
+            }
+        }
+    } else {
+        const float bottom = top + row;
+        float x = kShadowMargin + 8.0f;
+        for (const auto& item : raw_items_) {
+            const float width = item_width(item);
+            ItemBox box;
+            box.rect = D2D1::RectF(x, top + 3.0f, x + width, bottom - 3.0f);
+            box.item = item;
+            items_.push_back(std::move(box));
+            x += width + 2.0f;
+        }
+        if (!raw_items_.empty()) {
+            x += 4.0f;
+            if (has_prev_) {
+                HitBox hit;
+                hit.rect = D2D1::RectF(x, top + 2.0f, x + kArrowWidth,
+                                       bottom - 2.0f);
+                hit.kind = -2;
+                hits_.push_back(hit);
+                x += kArrowWidth;
+            }
+            if (has_next_) {
+                HitBox hit;
+                hit.rect = D2D1::RectF(x, top + 2.0f, x + kArrowWidth,
+                                       bottom - 2.0f);
+                hit.kind = -1;
+                hits_.push_back(hit);
+                x += kArrowWidth;
+            }
+        }
+        card_width_ = x + 8.0f - kShadowMargin;
+        card_height_ = row;
     }
 
-    if (!items.empty()) {
-        x += 4.0f;
-        if (has_prev_) {
-            HitBox hit;
-            hit.rect = D2D1::RectF(x, top + 2.0f, x + kArrowWidth, bottom - 2.0f);
-            hit.kind = -2;
-            hits_.push_back(hit);
-            x += kArrowWidth;
-        }
-        if (has_next_) {
-            HitBox hit;
-            hit.rect = D2D1::RectF(x, top + 2.0f, x + kArrowWidth, bottom - 2.0f);
-            hit.kind = -1;
-            hits_.push_back(hit);
-            x += kArrowWidth;
-        }
-    }
-
-    card_width_ = x + 8.0f - kShadowMargin;
-    card_height_ = kCardHeight;
     window_width_ = card_width_ + kShadowMargin * 2.0f;
     window_height_ = card_height_ + kShadowMargin * 2.0f;
-    ShowAt(caret);
 }
 
 void CandidateWindow::ShowModeBadge(bool chinese, const RECT& caret) {
@@ -294,11 +370,11 @@ void CandidateWindow::ShowModeBadge(bool chinese, const RECT& caret) {
 
     const float top = kShadowMargin;
     const float x = kShadowMargin + 8.0f;
-    chip_rect_ = D2D1::RectF(x, top + (kCardHeight - kChipHeight) / 2.0f,
+    chip_rect_ = D2D1::RectF(x, top + (row_height_ - kChipHeight) / 2.0f,
                              x + kChipWidth,
-                             top + (kCardHeight + kChipHeight) / 2.0f);
+                             top + (row_height_ + kChipHeight) / 2.0f);
     card_width_ = kChipWidth + 16.0f;
-    card_height_ = kCardHeight;
+    card_height_ = row_height_;
     window_width_ = card_width_ + kShadowMargin * 2.0f;
     window_height_ = card_height_ + kShadowMargin * 2.0f;
     ShowAt(caret);
@@ -506,11 +582,20 @@ void CandidateWindow::Paint() {
 
     // Divider + page chevrons.
     if (!hits_.empty()) {
-        const float divider_x = hits_.front().rect.left - 4.0f;
         brush->SetColor(palette.border);
-        target_->DrawLine(D2D1::Point2F(divider_x, top + 8.0f),
-                          D2D1::Point2F(divider_x, bottom - 8.0f), brush.Get(),
-                          1.0f);
+        if (vertical_) {
+            // Vertical lists put the arrows in a footer row.
+            const float divider_y = hits_.front().rect.top - 4.0f;
+            target_->DrawLine(
+                D2D1::Point2F(kShadowMargin + 8.0f, divider_y),
+                D2D1::Point2F(kShadowMargin + card_width_ - 8.0f, divider_y),
+                brush.Get(), 1.0f);
+        } else {
+            const float divider_x = hits_.front().rect.left - 4.0f;
+            target_->DrawLine(D2D1::Point2F(divider_x, top + 8.0f),
+                              D2D1::Point2F(divider_x, bottom - 8.0f),
+                              brush.Get(), 1.0f);
+        }
         for (const HitBox& hit : hits_) {
             const bool hot = hot_ == hit.kind;
             brush->SetColor(hot ? palette.accent : palette.secondary);

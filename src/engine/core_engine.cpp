@@ -2,6 +2,7 @@
 
 #include <pime/pime.h>
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
@@ -12,12 +13,24 @@
 #include <mutex>
 #include <thread>
 #include <unordered_map>
+#include <utility>
 
 #include "common/log.h"
+#include "common/store_key.h"
 #include "common/win_util.h"
 
 namespace pimewin {
 namespace {
+
+constexpr uint32_t kUserDictAliasLen = sizeof(kUserDictAlias) - 1;
+constexpr uint32_t kUserDictPrefixLen = sizeof(kUserDictPrefix) - 1;
+
+void CollectStoreEntry(void* ud, const char* key, uint32_t key_len,
+                       const char* value, uint32_t value_len) {
+    auto* out =
+        static_cast<std::vector<std::pair<std::string, std::string>>*>(ud);
+    out->emplace_back(std::string(key, key_len), std::string(value, value_len));
+}
 
 // pime-core stores paths as narrow strings and hands them to
 // std::filesystem, which interprets narrow strings in the ANSI code page.
@@ -98,6 +111,7 @@ struct CoreEngine::Impl {
 
     std::vector<UiCommand> capture;
     bool capturing = false;
+    uint64_t last_flush = 0;
 
     // ---- worker plumbing -------------------------------------------------
     bool Run(const std::function<void()>& fn) {
@@ -136,8 +150,21 @@ struct CoreEngine::Impl {
                 (*task)();
                 MarkDone(task);
             }
-            if (idle) Pump();
+            if (idle) {
+                Pump();
+                FlushStore(false);
+            }
         }
+    }
+
+    // Learning lands in the plugin store; the engine lives for the whole
+    // session, so it has to reach disk on its own rather than at shutdown.
+    void FlushStore(bool force) {
+        if (!core) return;
+        const uint64_t now = GetTickCount64();
+        if (!force && now - last_flush < 200) return;
+        last_flush = now;
+        pime_core_store_flush_all(core);
     }
 
     Session* Find(SessionId id) {
@@ -243,6 +270,15 @@ struct CoreEngine::Impl {
         core_config.log_level = PIME_LOG_INFO;
         core_config.flags = PIME_FLAG_ALLOW_INSECURE;
         core_config.memory_budget_mb = 256;
+
+        // Without a key every store call is denied: no learning, no user
+        // dictionary. The vector only has to outlive pime_core_create, which
+        // copies it into the core options.
+        std::vector<uint8_t> store_key;
+        if (LoadOrCreateStoreKey(config.data_dir, &store_key)) {
+            core_config.store_key = store_key.data();
+            core_config.store_key_len = static_cast<uint32_t>(store_key.size());
+        }
 
         if (!EnsureDirectory(PathJoin(config.data_dir, L"plugins"))) {
             WriteLog(LogLevel::Error, "engine", "cannot create plugin directory");
@@ -673,6 +709,117 @@ bool CoreEngine::SwitchChain(const std::string& chain) {
         ok = true;
     });
     return ok;
+}
+
+void CoreEngine::FlushStore() {
+    if (!impl_ || !impl_->ready) return;
+    impl_->Run([&] { impl_->FlushStore(true); });
+}
+
+void CoreEngine::UserDictList(uint32_t offset, uint32_t limit,
+                              UserDictReply* out) {
+    out->status = PIME_CLOSED;
+    if (!impl_ || !impl_->ready) return;
+    impl_->Run([&] {
+        std::vector<std::pair<std::string, std::string>> entries;
+        out->status = pime_core_store_scan(
+            impl_->core, kUserDictAlias, kUserDictAliasLen, kUserDictPrefix,
+            kUserDictPrefixLen, 0, &CollectStoreEntry, &entries);
+        out->words.clear();
+        if (out->status != PIME_OK) return;
+
+        std::vector<UserWord> words;
+        words.reserve(entries.size());
+        for (const auto& entry : entries) {
+            UserWord word;
+            if (!ParseUserDictKey(entry.first, &word.code, &word.word)) continue;
+            word.weight = DecodeUserDictValue(entry.second);
+            words.push_back(std::move(word));
+        }
+        out->total = static_cast<uint32_t>(words.size());
+
+        std::sort(words.begin(), words.end(),
+                  [](const UserWord& a, const UserWord& b) {
+                      if (a.weight != b.weight) return a.weight > b.weight;
+                      if (a.word != b.word) return a.word < b.word;
+                      return a.code < b.code;
+                  });
+        if (offset >= words.size()) return;
+        const size_t end =
+            limit == 0 ? words.size()
+                       : std::min(words.size(), static_cast<size_t>(offset) + limit);
+        out->words.assign(std::make_move_iterator(words.begin() + offset),
+                          std::make_move_iterator(words.begin() + end));
+    });
+}
+
+void CoreEngine::UserDictSet(const std::vector<UserWord>& words,
+                             UserDictReply* out) {
+    out->status = PIME_CLOSED;
+    if (!impl_ || !impl_->ready) return;
+    impl_->Run([&] {
+        pime_status first = PIME_OK;
+        for (const UserWord& word : words) {
+            const std::string key = MakeUserDictKey(word.code, word.word);
+            const std::string value = EncodeUserDictValue(word.weight);
+            const pime_status status = pime_core_store_set(
+                impl_->core, kUserDictAlias, kUserDictAliasLen, key.data(),
+                static_cast<uint32_t>(key.size()), value.data(),
+                static_cast<uint32_t>(value.size()));
+            if (status != PIME_OK && first == PIME_OK) first = status;
+            if (status == PIME_FULL) break;
+        }
+        const pime_status flushed = pime_core_store_flush(
+            impl_->core, kUserDictAlias, kUserDictAliasLen);
+        out->status = first != PIME_OK ? first : flushed;
+    });
+}
+
+void CoreEngine::UserDictDelete(const std::string& code,
+                                const std::string& word,
+                                UserDictReply* out) {
+    out->status = PIME_CLOSED;
+    if (!impl_ || !impl_->ready) return;
+    impl_->Run([&] {
+        const std::string key = MakeUserDictKey(code, word);
+        int deleted = 0;
+        pime_status status = pime_core_store_del(
+            impl_->core, kUserDictAlias, kUserDictAliasLen, key.data(),
+            static_cast<uint32_t>(key.size()), &deleted);
+        if (status == PIME_OK && deleted) {
+            status = pime_core_store_flush(impl_->core, kUserDictAlias,
+                                           kUserDictAliasLen);
+        } else if (status == PIME_OK) {
+            status = PIME_NOT_FOUND;
+        }
+        out->status = status;
+    });
+}
+
+void CoreEngine::UserDictClear(UserDictReply* out) {
+    out->status = PIME_CLOSED;
+    if (!impl_ || !impl_->ready) return;
+    impl_->Run([&] {
+        std::vector<std::pair<std::string, std::string>> entries;
+        pime_status status = pime_core_store_scan(
+            impl_->core, kUserDictAlias, kUserDictAliasLen, kUserDictPrefix,
+            kUserDictPrefixLen, 0, &CollectStoreEntry, &entries);
+        if (status != PIME_OK) {
+            out->status = status;
+            return;
+        }
+        for (const auto& entry : entries) {
+            int deleted = 0;
+            const pime_status erased = pime_core_store_del(
+                impl_->core, kUserDictAlias, kUserDictAliasLen,
+                entry.first.data(), static_cast<uint32_t>(entry.first.size()),
+                &deleted);
+            if (erased != PIME_OK && status == PIME_OK) status = erased;
+        }
+        const pime_status flushed = pime_core_store_flush(
+            impl_->core, kUserDictAlias, kUserDictAliasLen);
+        out->status = status != PIME_OK ? status : flushed;
+    });
 }
 
 }  // namespace pimewin

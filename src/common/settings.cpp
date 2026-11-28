@@ -22,6 +22,10 @@ Settings LoadSettings() {
     settings.chinese = RegistryGetDword(HKEY_CURRENT_USER, kRoot, L"Chinese", 1);
     settings.punctuation =
         RegistryGetDword(HKEY_CURRENT_USER, kRoot, L"Punctuation", 1);
+    settings.candidate_vertical =
+        RegistryGetDword(HKEY_CURRENT_USER, kRoot, L"CandidateVertical", 0);
+    settings.candidate_font =
+        RegistryGetDword(HKEY_CURRENT_USER, kRoot, L"CandidateFont", 15);
 
     if (settings.chain.empty() || settings.chain.find(L"..") != std::wstring::npos ||
         settings.chain.find_first_of(L"\\/:") != std::wstring::npos) {
@@ -32,6 +36,9 @@ Settings LoadSettings() {
     if (settings.page_size > 9) settings.page_size = 9;
     settings.chinese = settings.chinese ? 1 : 0;
     settings.punctuation = settings.punctuation ? 1 : 0;
+    settings.candidate_vertical = settings.candidate_vertical ? 1 : 0;
+    if (settings.candidate_font < 12) settings.candidate_font = 12;
+    if (settings.candidate_font > 24) settings.candidate_font = 24;
     return settings;
 }
 
@@ -42,6 +49,10 @@ void SaveSettings(const Settings& settings) {
     RegistrySetDword(HKEY_CURRENT_USER, kRoot, L"Chinese", settings.chinese);
     RegistrySetDword(HKEY_CURRENT_USER, kRoot, L"Punctuation",
                      settings.punctuation);
+    RegistrySetDword(HKEY_CURRENT_USER, kRoot, L"CandidateVertical",
+                     settings.candidate_vertical);
+    RegistrySetDword(HKEY_CURRENT_USER, kRoot, L"CandidateFont",
+                     settings.candidate_font);
 }
 
 bool LoadAppMode(const std::wstring& app, bool fallback) {

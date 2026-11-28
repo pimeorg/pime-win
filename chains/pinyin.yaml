@@ -16,8 +16,10 @@ plugins:
   - { id: pime-shape-parse, role: parse }
   - { id: pime-pinyin-translate, role: translate,
       settings: { max_candidates: 64 } }
+  # decay_days: 0 keeps learned words forever: they are the user dictionary,
+  # which the settings window shows and edits.
   - { id: pime-pinyin-rank, role: rank,
-      settings: { page_size: 6, max_candidates: 64 } }
+      settings: { page_size: 6, max_candidates: 64, decay_days: 0 } }
   - { id: pime-special-candidates, role: translate }
   - { id: pime-shortcuts, role: translate }
   - { id: pime-hans-hant, role: translate }

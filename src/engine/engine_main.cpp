@@ -16,6 +16,7 @@
 #include <utility>
 #include <vector>
 
+#include <pime/core.h>
 #include <pime/hal.h>
 
 #include "common/ipc.h"
@@ -332,6 +333,12 @@ Message HelloReply(const Message& request) {
     writer.Str(ToUtf8(CoreEngine::Instance().version()));
     EncodeSettings(writer, settings);
     reply.payload = std::move(writer.data());
+    // The strip lives on the UI thread; restyle and redraw there.
+    PostUi([vertical = settings.candidate_vertical != 0,
+            font = settings.candidate_font] {
+        g_window.SetStyle(vertical, font);
+        if (g_shown) Render(g_shown);
+    });
     return reply;
 }
 
@@ -528,6 +535,49 @@ void HandleMessage(Client* client, const Message& request) {
             PostUi([session = request.session] { Render(session, true); });
             return;
         }
+        case MsgKind::UserDict: {
+            uint32_t op_value = 0;
+            if (!reader.U32(&op_value)) return;
+            const auto op = static_cast<UserDictOp>(op_value);
+            UserDictReply result;
+            switch (op) {
+                case UserDictOp::List: {
+                    uint32_t offset = 0, limit = 0;
+                    if (!reader.U32(&offset) || !reader.U32(&limit)) return;
+                    CoreEngine::Instance().UserDictList(offset, limit, &result);
+                    break;
+                }
+                case UserDictOp::Delete: {
+                    std::string code, word;
+                    if (!reader.Str(&code) || !reader.Str(&word)) return;
+                    CoreEngine::Instance().UserDictDelete(code, word, &result);
+                    break;
+                }
+                case UserDictOp::Clear:
+                    CoreEngine::Instance().UserDictClear(&result);
+                    break;
+                case UserDictOp::BatchSet: {
+                    std::vector<UserWord> words;
+                    if (!DecodeUserWords(reader, &words)) return;
+                    CoreEngine::Instance().UserDictSet(words, &result);
+                    break;
+                }
+                default:
+                    return;
+            }
+            if (result.status != PIME_OK) {
+                WriteLog(LogLevel::Warn, "dict",
+                         "op " + std::to_string(op_value) + ": " +
+                             pime_status_string(
+                                 static_cast<pime_status>(result.status)));
+            }
+            Message reply = Reply(MsgKind::UserDictReply, request);
+            ByteWriter writer;
+            EncodeUserDictReply(writer, result);
+            reply.payload = std::move(writer.data());
+            SendTo(client, reply);
+            return;
+        }
         case MsgKind::EngineVersion:
             SendTo(client, HelloReply(request));
             return;
@@ -660,6 +710,8 @@ void RunServer() {
     // The strip lives here now, not in the host: replacing this process is
     // what makes the candidate window hot-updatable.
     g_window.SetDark(DarkFor(g_settings.theme));
+    g_window.SetStyle(g_settings.candidate_vertical != 0,
+                      g_settings.candidate_font);
     WriteLog(LogLevel::Info, "engine",
              g_window.Create(&g_ui_delegate) ? "candidate window created"
                                              : "candidate window create failed");

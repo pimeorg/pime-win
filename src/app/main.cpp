@@ -160,7 +160,8 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
     // The GUI exe has no console of its own; attach to the caller's so the
     // headless probe can print when run from a terminal.
     const bool keys = argv && WantsFlag(argc, argv, L"--keys");
-    if (keys) {
+    const bool dict = argv && WantsFlag(argc, argv, L"--dict");
+    if (keys || dict) {
         // A GUI subsystem process usually inherits the caller's stdout (pipe
         // or console), which keeps output capturable; only attach a console
         // when launched without any standard handle.

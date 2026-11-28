@@ -13,6 +13,8 @@
 #include <string>
 #include <vector>
 
+#include "common/user_dict_format.h"
+
 namespace pimewin {
 
 // Posted to the session's notify window when asynchronous output is pending.
@@ -61,6 +63,14 @@ struct EngineConfig {
     uint32_t candidate_budget = 96;
 };
 
+// Result of a user-dictionary operation. `status` is a pime_status value;
+// `total` is the entry count for List.
+struct UserDictReply {
+    int status = 0;
+    uint32_t total = 0;
+    std::vector<UserWord> words;
+};
+
 using SessionId = uint64_t;
 
 class CoreEngine {
@@ -92,6 +102,18 @@ public:
 
     // Rebuilds and activates a generation from another chain file.
     bool SwitchChain(const std::string& chain);
+
+    // Writes every dirty plugin store namespace now (learning otherwise
+    // reaches disk a few times a second at most).
+    void FlushStore();
+
+    // User dictionary, backed by rank's `usr/` namespace. All of these block
+    // on the worker thread, so call them from the IPC thread only.
+    void UserDictList(uint32_t offset, uint32_t limit, UserDictReply* out);
+    void UserDictSet(const std::vector<UserWord>& words, UserDictReply* out);
+    void UserDictDelete(const std::string& code, const std::string& word,
+                        UserDictReply* out);
+    void UserDictClear(UserDictReply* out);
 
     struct Impl;
 

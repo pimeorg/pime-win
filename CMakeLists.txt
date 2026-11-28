@@ -60,7 +60,10 @@ add_library(pime_host STATIC
     src/common/win_util.cpp
     src/common/log.cpp
     src/common/settings.cpp
+    src/common/store_key.cpp
+    src/common/user_dict_format.cpp
     src/engine/core_engine.cpp
+    src/tsf/ipc_client.cpp
 )
 target_include_directories(pime_host PUBLIC
     "${CMAKE_CURRENT_SOURCE_DIR}/src"
@@ -71,7 +74,7 @@ target_compile_definitions(pime_host PUBLIC
 )
 target_compile_options(pime_host PRIVATE /utf-8 /W4 /permissive-)
 target_link_libraries(pime_host PUBLIC pime_core
-    PRIVATE advapi32 shlwapi ole32)
+    PRIVATE advapi32 shlwapi ole32 bcrypt crypt32)
 
 # ---------------------------------------------------------------------------
 # TSF text service
@@ -82,7 +85,6 @@ add_library(pime_tsf SHARED
     src/tsf/pime_tsf.rc
     src/tsf/register.cpp
     src/tsf/text_service.cpp
-    src/tsf/ipc_client.cpp
     src/tsf/display_attr.cpp
 )
 target_compile_definitions(pime_tsf PRIVATE PIME_TSF_BUILD)
@@ -120,6 +122,7 @@ set_target_properties(pime_engine PROPERTIES
 add_executable(pime WIN32
     src/app/main.cpp
     src/app/settings_window.cpp
+    src/app/rime_dict.cpp
     src/app/pime.rc
     src/tsf/register.cpp
     src/demo/main.cpp

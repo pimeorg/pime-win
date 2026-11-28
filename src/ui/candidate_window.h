@@ -36,6 +36,9 @@ public:
     void Destroy();
 
     void SetDark(bool dark);
+    // 0 = horizontal strip, 1 = vertical list; font is the candidate text
+    // size in DIP. Applied to the next paint, and immediately when visible.
+    void SetStyle(bool vertical, uint32_t font_dip);
 
     // `caret` is the composition caret in physical screen pixels. `page` is
     // the zero-based page shown; `has_prev`/`has_next` drive the chevrons.
@@ -55,6 +58,8 @@ private:
     LRESULT HandleMessage(HWND hwnd, UINT message, WPARAM wparam,
                           LPARAM lparam);
 
+    void CreateFormats();
+    void LayoutCandidates();
     void Paint();
     bool EnsureTargets(float width_dip, float height_dip);
     float Scale() const;
@@ -77,11 +82,15 @@ private:
     bool dark_ = false;
     bool badge_ = false;
     bool chinese_ = true;
+    bool vertical_ = false;
+    uint32_t font_dip_ = 15;
+    float row_height_ = 38.0f;
     int page_ = 0;
     bool has_prev_ = false;
     bool has_next_ = false;
     UINT dpi_ = 96;
     RECT caret_{};
+    std::vector<CandidateItem> raw_items_;
     std::vector<ItemBox> items_;
     std::vector<HitBox> hits_;
     D2D1_RECT_F chip_rect_{};

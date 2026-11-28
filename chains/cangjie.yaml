@@ -1,0 +1,18 @@
+# Desktop Cangjie chain (letter codes, at most five per character).
+#
+# Compile:
+#   python ../pime-public-plugin/tools/chainc chains/cangjie.yaml \
+#          -o assets/chains/cangjie.cbor
+api: 1
+id: cangjie
+description: 仓颉（桌面）
+core: ">=1.0.0"
+
+plugins:
+  - { id: pime-keymap-default, role: preprocess }
+  - { id: pime-cangjie-parse, role: parse }
+  - { id: pime-cangjie-translate, role: translate,
+      settings: { max_candidates: 32 } }
+  - { id: pime-rank-default, role: rank,
+      settings: { max_candidates: 32 } }
+  - { id: pime-candidates-format, role: format, settings: { page_size: 6 } }

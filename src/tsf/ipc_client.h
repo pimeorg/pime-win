@@ -69,6 +69,14 @@ public:
     bool RefreshSettings();
     bool SwitchChain(const std::string& chain);
 
+    // User dictionary. `status` receives a pime_status value when the engine
+    // answered; false means the engine could not be reached at all.
+    bool UserDictList(uint32_t offset, uint32_t limit, UserDictReply* out);
+    bool UserDictSet(const std::vector<UserWord>& words, int* status);
+    bool UserDictDelete(const std::string& code, const std::string& word,
+                        int* status);
+    bool UserDictClear(int* status);
+
 private:
     IpcClient() = default;
     ~IpcClient();

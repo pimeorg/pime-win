@@ -43,6 +43,15 @@ enum class MsgKind : uint32_t {
     ModeChanged = 17,  // engine -> shell push
     SaveAppMode = 18,  // shell -> engine: persist per-app 中/英
     HideCandidates = 19,  // shell -> engine: the host went away, hide the strip
+    UserDict = 20,        // shell -> engine: read/write the user dictionary
+    UserDictReply = 21,
+};
+
+enum class UserDictOp : uint32_t {
+    List = 0,      // {offset, limit}
+    Delete = 1,    // {code, word}
+    Clear = 2,     // {}
+    BatchSet = 3,  // {words}
 };
 
 struct Message {
@@ -158,6 +167,45 @@ inline bool DecodeCommands(ByteReader& r, std::vector<UiCommand>* out) {
     return true;
 }
 
+inline void EncodeUserWord(ByteWriter& w, const UserWord& word) {
+    w.Str(word.code);
+    w.Str(word.word);
+    w.U32(word.weight);
+}
+
+inline bool DecodeUserWord(ByteReader& r, UserWord* word) {
+    return r.Str(&word->code) && r.Str(&word->word) && r.U32(&word->weight);
+}
+
+inline void EncodeUserWords(ByteWriter& w, const std::vector<UserWord>& words) {
+    w.U32(static_cast<uint32_t>(words.size()));
+    for (const UserWord& word : words) EncodeUserWord(w, word);
+}
+
+inline bool DecodeUserWords(ByteReader& r, std::vector<UserWord>* out) {
+    uint32_t count = 0;
+    if (!r.U32(&count)) return false;
+    out->clear();
+    for (uint32_t i = 0; i < count; ++i) {
+        UserWord word;
+        if (!DecodeUserWord(r, &word)) return false;
+        out->push_back(std::move(word));
+    }
+    return true;
+}
+
+// List reply: [i32 status][u32 total][words]. Every other op: [i32 status].
+inline void EncodeUserDictReply(ByteWriter& w, const UserDictReply& reply) {
+    w.I32(reply.status);
+    w.U32(reply.total);
+    EncodeUserWords(w, reply.words);
+}
+
+inline bool DecodeUserDictReply(ByteReader& r, UserDictReply* reply) {
+    return r.I32(&reply->status) && r.U32(&reply->total) &&
+           DecodeUserWords(r, &reply->words);
+}
+
 // Settings travel in HelloReply and ReloadSettings replies. The engine reads
 // them from HKCU on the outside; a packaged host's own read is virtualized.
 inline void EncodeSettings(ByteWriter& w, const Settings& s) {
@@ -166,12 +214,15 @@ inline void EncodeSettings(ByteWriter& w, const Settings& s) {
     w.U32(s.page_size);
     w.U32(s.chinese);
     w.U32(s.punctuation);
+    w.U32(s.candidate_vertical);
+    w.U32(s.candidate_font);
 }
 
 inline bool DecodeSettings(ByteReader& r, Settings* s) {
     std::string chain;
     if (!r.Str(&chain) || !r.U32(&s->theme) || !r.U32(&s->page_size) ||
-        !r.U32(&s->chinese) || !r.U32(&s->punctuation)) {
+        !r.U32(&s->chinese) || !r.U32(&s->punctuation) ||
+        !r.U32(&s->candidate_vertical) || !r.U32(&s->candidate_font)) {
         return false;
     }
     s->chain = ToWide(chain);

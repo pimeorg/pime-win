@@ -428,6 +428,58 @@ bool IpcClient::SwitchChain(const std::string& chain) {
     return true;
 }
 
+bool IpcClient::UserDictList(uint32_t offset, uint32_t limit,
+                             UserDictReply* out) {
+    ByteWriter writer;
+    writer.U32(static_cast<uint32_t>(UserDictOp::List));
+    writer.U32(offset);
+    writer.U32(limit);
+    Message reply;
+    if (!Request(MsgKind::UserDict, 0, 0, writer.data(), &reply)) return false;
+    ByteReader reader(reply.payload.data(), reply.payload.size());
+    return DecodeUserDictReply(reader, out);
+}
+
+bool IpcClient::UserDictSet(const std::vector<UserWord>& words, int* status) {
+    ByteWriter writer;
+    writer.U32(static_cast<uint32_t>(UserDictOp::BatchSet));
+    EncodeUserWords(writer, words);
+    Message reply;
+    if (!Request(MsgKind::UserDict, 0, 0, writer.data(), &reply)) return false;
+    UserDictReply result;
+    ByteReader reader(reply.payload.data(), reply.payload.size());
+    if (!DecodeUserDictReply(reader, &result)) return false;
+    *status = result.status;
+    return true;
+}
+
+bool IpcClient::UserDictDelete(const std::string& code,
+                               const std::string& word, int* status) {
+    ByteWriter writer;
+    writer.U32(static_cast<uint32_t>(UserDictOp::Delete));
+    writer.Str(code);
+    writer.Str(word);
+    Message reply;
+    if (!Request(MsgKind::UserDict, 0, 0, writer.data(), &reply)) return false;
+    UserDictReply result;
+    ByteReader reader(reply.payload.data(), reply.payload.size());
+    if (!DecodeUserDictReply(reader, &result)) return false;
+    *status = result.status;
+    return true;
+}
+
+bool IpcClient::UserDictClear(int* status) {
+    ByteWriter writer;
+    writer.U32(static_cast<uint32_t>(UserDictOp::Clear));
+    Message reply;
+    if (!Request(MsgKind::UserDict, 0, 0, writer.data(), &reply)) return false;
+    UserDictReply result;
+    ByteReader reader(reply.payload.data(), reply.payload.size());
+    if (!DecodeUserDictReply(reader, &result)) return false;
+    *status = result.status;
+    return true;
+}
+
 bool IpcClient::TakeAsync(SessionId session, std::vector<UiCommand>* out) {
     std::lock_guard<std::mutex> lock(sessions_mutex_);
     const auto it = pending_.find(session);

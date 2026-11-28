@@ -13,6 +13,10 @@ struct Settings {
     uint32_t chinese = 1;
     // 1 = full-width Chinese punctuation, 0 = ASCII punctuation.
     uint32_t punctuation = 1;
+    // 0 = horizontal candidate strip, 1 = vertical list.
+    uint32_t candidate_vertical = 0;
+    // Candidate text size in DIP (12..24).
+    uint32_t candidate_font = 15;
 };
 
 Settings LoadSettings();

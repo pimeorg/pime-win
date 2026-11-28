@@ -2,6 +2,7 @@
 //
 //   pime --keys nihao            type nihao, show the chain output
 //   pime --keys nihao --commit   ... then press space to commit
+//   pime --dict                  list the user dictionary (code, word, weight)
 //
 // It runs the same host layer as the text service (CoreEngine), so a failure
 // here is a kernel/plugin/chain problem, not a TSF one.
@@ -94,6 +95,7 @@ struct Options {
     std::string chain = "default.cbor";
     std::string keys;
     bool commit = false;
+    bool dict = false;
 };
 
 Options Parse(int argc, wchar_t** argv) {
@@ -110,9 +112,11 @@ Options Parse(int argc, wchar_t** argv) {
         else if (arg == L"--chain") options.chain = pimewin::ToUtf8(next());
         else if (arg == L"--keys") options.keys = pimewin::ToUtf8(next());
         else if (arg == L"--commit") options.commit = true;
+        else if (arg == L"--dict") options.dict = true;
         else if (arg == L"--help" || arg == L"-h") {
             Print(L"pime --keys TEXT [--commit] [--res DIR] [--data DIR] "
-                  L"[--chain FILE]\n");
+                  L"[--chain FILE]\n"
+                  L"pime --dict [--res DIR] [--data DIR]\n");
             ExitProcess(0);
         }
     }
@@ -135,6 +139,21 @@ int Run(const Options& options) {
     }
     Print(L"core " + engine.version() + L" started in " +
           std::to_wstring(GetTickCount64() - started) + L" ms\n");
+
+    if (options.dict) {
+        UserDictReply reply;
+        engine.UserDictList(0, 0, &reply);
+        if (reply.status != 0) {
+            Print(L"dict failed: " + std::to_wstring(reply.status) + L"\n");
+            return 1;
+        }
+        Print(L"dict " + std::to_wstring(reply.total) + L" entries\n");
+        for (const UserWord& word : reply.words) {
+            Print(L"  " + ToWide(word.code) + L"\t" + ToWide(word.word) +
+                  L"\t" + std::to_wstring(word.weight) + L"\n");
+        }
+        return 0;
+    }
 
     const SessionId session = engine.OpenSession(nullptr, L"pime.exe",
                                                  PIME_FIELD_TEXT, 0);
@@ -175,6 +194,7 @@ int Run(const Options& options) {
 
     engine.Focus(session, false);
     engine.CloseSession(session);
+    engine.FlushStore();
     return saw_output ? 0 : 2;
 }
 

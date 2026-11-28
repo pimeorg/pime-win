@@ -1,0 +1,20 @@
+# Desktop Wubi 86 chain. The parse plugin also answers pinyin when the code
+# is not a valid Wubi code, so 五笔/拼音 mixed input works without a second
+# chain (pinyin_lookup is on by default).
+#
+# Compile:
+#   python ../pime-public-plugin/tools/chainc chains/wubi86.yaml \
+#          -o assets/chains/wubi86.cbor
+api: 1
+id: wubi86
+description: 五笔 86（桌面）
+core: ">=1.0.0"
+
+plugins:
+  - { id: pime-keymap-default, role: preprocess }
+  - { id: pime-wubi-parse, role: parse }
+  - { id: pime-wubi-translate, role: translate,
+      settings: { max_candidates: 32 } }
+  - { id: pime-rank-default, role: rank,
+      settings: { max_candidates: 32 } }
+  - { id: pime-candidates-format, role: format, settings: { page_size: 6 } }

@@ -495,13 +495,19 @@ public:
         // expressions ("v1.5") keep their ASCII operators and single quotes
         // stay syllable separators ("xi'an").
         const std::string ascii = KeyText(vkey, lparam);
-        const std::wstring converted = ChinesePunctuation(ascii);
         const bool full_width = settings_.punctuation != 0;
         std::wstring punctuation;
-        if (!converted.empty()) {
-            punctuation = full_width ? converted : ToWide(ascii);
+        if (const wchar_t* mark = FullWidthMark(ascii)) {
+            punctuation = full_width ? mark : ToWide(ascii);
         } else if (composition_text_.empty() && ascii == "'") {
-            punctuation = full_width ? L"’" : L"'";
+            // Curly quotes alternate open/close, like every desktop IME. The
+            // apostrophe is a syllable separator inside a preedit, so it only
+            // becomes a quote while idle.
+            punctuation = full_width ? (single_quote_open_ ? L"‘" : L"’") : L"'";
+            if (full_width) single_quote_open_ = !single_quote_open_;
+        } else if (ascii == "\"") {
+            punctuation = full_width ? (double_quote_open_ ? L"“" : L"”") : L"\"";
+            if (full_width) double_quote_open_ = !double_quote_open_;
         } else if (!composition_text_.empty() && IsPlainMark(ascii)) {
             // The chain has no use for this symbol in a pinyin buffer, so end
             // the preedit and type it; leaving it to the engine drops the key.
@@ -666,8 +672,11 @@ private:
         // Idle: letters start a preedit and Chinese marks are converted; a
         // digit, space or plain symbol would only be handed back unchanged, so
         // leave it to the app instead of claiming and dropping it.
-        return IsLetter(text) || !ChinesePunctuation(text).empty() ||
-               text == "'";
+        return IsLetter(text) || IsPunctuationKey(text);
+    }
+
+    static bool IsPunctuationKey(const std::string& text) {
+        return FullWidthMark(text) != nullptr || text == "\"" || text == "'";
     }
 
     // Single ASCII letter. Everything the chain can put into a pinyin buffer.
@@ -762,10 +771,11 @@ private:
         return VK_PACKET;
     }
 
-    // Full-width form of the ASCII mark, or empty when the key is not
-    // punctuation. Only single-byte ASCII input can match.
-    static std::wstring ChinesePunctuation(const std::string& text) {
-        if (text.size() != 1) return {};
+    // Full-width form of an ASCII mark, or null when the key is not
+    // punctuation. Only single-byte ASCII input can match. Quotes are not
+    // here: they alternate open/close and need state, handled by the caller.
+    static const wchar_t* FullWidthMark(const std::string& text) {
+        if (text.size() != 1) return nullptr;
         switch (text[0]) {
             case ',': return L"，";
             case '.': return L"。";
@@ -780,7 +790,24 @@ private:
             case ')': return L"）";
             case '[': return L"【";
             case ']': return L"】";
-            default: return {};
+            case '{': return L"｛";
+            case '}': return L"｝";
+            case '~': return L"～";
+            case '@': return L"＠";
+            case '#': return L"＃";
+            case '$': return L"￥";
+            case '%': return L"％";
+            case '^': return L"＾";
+            case '&': return L"＆";
+            case '*': return L"＊";
+            case '-': return L"－";
+            case '_': return L"＿";
+            case '+': return L"＋";
+            case '=': return L"＝";
+            case '|': return L"｜";
+            case '/': return L"／";
+            case '`': return L"｀";
+            default: return nullptr;
         }
     }
 
@@ -1268,6 +1295,9 @@ private:
     bool chinese_ = true;
     bool shift_down_ = false;
     bool shift_used_ = false;
+    // Alternating curly quotes (“ ” / ‘ ’), flipped as each one is typed.
+    bool double_quote_open_ = true;
+    bool single_quote_open_ = true;
 
     HWND notify_hwnd_ = nullptr;
     UINT config_message_ = 0;
