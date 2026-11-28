@@ -492,12 +492,60 @@ public:
         if (shift_down_) shift_used_ = true;
         if (!ShouldClaim(vkey, lparam) || !session_) return S_OK;
 
+        // Enter commits the pinyin as it was typed; Space is the key that
+        // picks the first candidate. The chain maps both to the same commit,
+        // so handle Enter here and keep it out of the engine.
+        if (vkey == VK_RETURN && (composition_ || candidates_up_)) {
+            const std::wstring text = composition_text_;
+            bool committed = false;
+            if (context_) {
+                committed = SUCCEEDED(RequestEdit([&](TfEditCookie ec) {
+                    CommitInContext(ec, text);
+                }));
+            }
+            if (!committed) {
+                DropPreedit();
+            } else {
+                candidates_up_ = false;
+                IpcClient::Instance().HideCandidates(session_);
+                IpcClient::Instance().Reset(session_);
+            }
+            if (committed) *eaten = TRUE;
+            return S_OK;
+        }
+
         // A mark typed while composing commits the selected candidate first,
         // then goes in as typed; while idle it is inserted directly. The
         // setting chooses full-width Chinese marks or ASCII. v-mode
         // expressions ("v1.5") keep their ASCII operators and single quotes
         // stay syllable separators ("xi'an").
         const std::string ascii = KeyText(vkey, lparam);
+        // With Shift held a letter is typed as an uppercase character: it
+        // goes into the document as is, instead of the pinyin buffer, which
+        // lowercases it. An in-flight composition is finished as its raw
+        // pinyin first so the typed letters are not lost.
+        if (shift_down_ && IsLetter(ascii)) {
+            std::wstring letter = ToWide(ascii);
+            if (letter[0] >= L'a' && letter[0] <= L'z') {
+                letter[0] = static_cast<wchar_t>(letter[0] - L'a' + L'A');
+            }
+            const std::wstring text = composition_text_ + letter;
+            bool committed = false;
+            if (context_) {
+                committed = SUCCEEDED(RequestEdit([&](TfEditCookie ec) {
+                    CommitInContext(ec, text);
+                }));
+            }
+            if (!committed) {
+                DropPreedit();
+            } else {
+                candidates_up_ = false;
+                IpcClient::Instance().HideCandidates(session_);
+                IpcClient::Instance().Reset(session_);
+            }
+            if (committed) *eaten = TRUE;
+            return S_OK;
+        }
         const bool full_width = settings_.punctuation != 0;
         std::wstring punctuation;
         if (const wchar_t* mark = FullWidthMark(ascii)) {
