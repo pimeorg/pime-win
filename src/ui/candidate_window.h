@@ -42,8 +42,10 @@ public:
 
     // `caret` is the composition caret in physical screen pixels. `page` is
     // the zero-based page shown; `has_prev`/`has_next` drive the chevrons.
+    // `selected` is the slot space will commit (highlighted, -1 for none).
     void ShowCandidates(const std::vector<CandidateItem>& items, int page,
-                        bool has_prev, bool has_next, const RECT& caret);
+                        bool has_prev, bool has_next, const RECT& caret,
+                        int selected = -1);
     void ShowModeBadge(bool chinese, const RECT& caret);
     void Hide();
 
@@ -86,6 +88,7 @@ private:
     uint32_t font_dip_ = 15;
     float row_height_ = 38.0f;
     int page_ = 0;
+    int selected_ = -1;
     bool has_prev_ = false;
     bool has_next_ = false;
     UINT dpi_ = 96;

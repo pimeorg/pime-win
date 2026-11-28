@@ -689,6 +689,11 @@ private:
             ModifierDown(VK_LWIN) || ModifierDown(VK_RWIN)) {
             return false;
         }
+        // Shift+arrows select text in the app; only plain arrows move the
+        // candidate selection.
+        if ((vkey == VK_LEFT || vkey == VK_RIGHT) && ModifierDown(VK_SHIFT)) {
+            return false;
+        }
         const std::string text = KeyText(vkey, lparam);
         if (composition_ || candidates_up_) {
             // While a preedit is up the IME owns every key that can extend,
@@ -763,6 +768,8 @@ private:
             case VK_END:
             case VK_UP:
             case VK_DOWN:
+            case VK_LEFT:
+            case VK_RIGHT:
             case VK_DELETE:
                 return true;
             default:

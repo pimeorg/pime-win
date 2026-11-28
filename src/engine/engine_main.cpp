@@ -46,9 +46,18 @@ struct SessionUi {
     uint32_t page = 0;
     uint32_t page_size = 6;
     bool candidates_up = false;
+    uint32_t selected = 0;     // slot space commits; moved with left/right
+    std::string composition;   // UTF-8 preedit, also tells v-mode apart
     std::vector<CandidateItem> items;
     RECT caret{};
 };
+
+// v-prefixed composition keeps ASCII operators (+ - = ...) as input, so it
+// must not page or move the candidate selection.
+bool IsVMode(const std::string& composition) {
+    return !composition.empty() &&
+           (composition[0] == 'v' || composition[0] == 'V');
+}
 
 std::mutex g_state_mutex;
 std::set<Client*> g_clients;
@@ -140,6 +149,8 @@ void PushModeChanged(SessionId session, bool chinese) {
 std::vector<UiCommand> ApplyCommands(SessionId session, const std::vector<UiCommand>& commands) {
     std::vector<UiCommand> host;
     std::vector<CandidateItem> items;
+    std::string composition;
+    bool composition_changed = false;
     bool show = false;
     bool hide = false;
     for (const UiCommand& command : commands) {
@@ -160,7 +171,13 @@ std::vector<UiCommand> ApplyCommands(SessionId session, const std::vector<UiComm
                 MessageBeep(MB_OK);
                 break;
             case UiKind::Composition:
+                composition = command.text;
+                composition_changed = true;
+                host.push_back(command);
+                break;
             case UiKind::Commit:
+                composition.clear();
+                composition_changed = true;
                 host.push_back(command);
                 break;
             case UiKind::Notify:
@@ -177,6 +194,7 @@ std::vector<UiCommand> ApplyCommands(SessionId session, const std::vector<UiComm
         const auto it = g_ui.find(session);
         if (it == g_ui.end()) return host;
         SessionUi& ui = it->second;
+        if (composition_changed) ui.composition = std::move(composition);
         // Commit and hide end the strip even when the same batch also carries
         // fresh candidates: pime-core emits a commit followed by a candidates
         // + hide pair after space/enter/digit picks.
@@ -184,9 +202,11 @@ std::vector<UiCommand> ApplyCommands(SessionId session, const std::vector<UiComm
             ui.items.clear();
             ui.candidates_up = false;
             ui.page = 0;
+            ui.selected = 0;
         } else {
             ui.items = std::move(items);
             ui.candidates_up = true;
+            ui.selected = 0;
         }
     }
     return host;
@@ -200,6 +220,8 @@ void HideStrip(SessionId session) {
             it->second.items.clear();
             it->second.candidates_up = false;
             it->second.page = 0;
+            it->second.selected = 0;
+            it->second.composition.clear();
         }
     }
     PostUi([session] {
@@ -244,8 +266,12 @@ void Render(SessionId session, bool badge = false) {
         GetCursorPos(&point);
         caret = RECT{point.x, point.y, point.x, point.y};
     }
+    const int selected =
+        ui.composition.empty() || IsVMode(ui.composition)
+            ? -1
+            : static_cast<int>(ui.selected);
     g_window.ShowCandidates(ui.items, static_cast<int>(ui.page), ui.page > 0,
-                            ui.items.size() >= ui.page_size, caret);
+                            ui.items.size() >= ui.page_size, caret, selected);
     g_shown = session;
 }
 
@@ -290,6 +316,8 @@ struct EngineUi final : CandidateWindow::Delegate {
             ui.items.clear();
             ui.candidates_up = false;
             ui.page = 0;
+            ui.selected = 0;
+            ui.composition.clear();
             chinese = ui.chinese;
             app = ui.app;
         }
@@ -439,12 +467,50 @@ void HandleMessage(Client* client, const Message& request) {
                 !reader.U32(&event.action) || !reader.Str(&event.text)) {
                 return;
             }
+            // Left/right walk the visible page and space commits the picked
+            // slot; both are local, the chain never sees them.
+            bool handled_locally = false;
             {
                 std::lock_guard<std::mutex> lock(g_state_mutex);
                 const auto it = g_ui.find(request.session);
                 if (it != g_ui.end()) {
-                    it->second.page = PageAfter(it->second.page, event.keycode);
+                    SessionUi& ui = it->second;
+                    const bool composing = !ui.composition.empty();
+                    const bool list_up =
+                        composing && ui.candidates_up && !ui.items.empty() &&
+                        !IsVMode(ui.composition);
+                    if (event.keycode == VK_LEFT || event.keycode == VK_RIGHT) {
+                        if (list_up) {
+                            if (event.keycode == VK_LEFT && ui.selected > 0) {
+                                --ui.selected;
+                            } else if (event.keycode == VK_RIGHT &&
+                                       ui.selected + 1 < ui.items.size()) {
+                                ++ui.selected;
+                            }
+                        }
+                        handled_locally = composing;
+                    } else if (event.keycode == VK_SPACE && list_up &&
+                               ui.selected > 0) {
+                        // The format plugin picks by digit on its own page, so
+                        // replay the pick as the digit key rather than guessing
+                        // an absolute index.
+                        event.keycode = static_cast<uint32_t>(L'1' + ui.selected);
+                        event.text.assign(
+                            1, static_cast<char>('1' + ui.selected));
+                    } else {
+                        ui.page = PageAfter(ui.page, event.keycode);
+                    }
                 }
+            }
+            if (handled_locally) {
+                Message reply = Reply(MsgKind::KeyReply, request);
+                reply.flags = 1;
+                ByteWriter writer;
+                EncodeCommands(writer, {});
+                reply.payload = std::move(writer.data());
+                SendTo(client, reply);
+                PostUi([session = request.session] { Render(session); });
+                return;
             }
             const KeyResult result = CoreEngine::Instance().Key(request.session, event);
             const std::vector<UiCommand> host = ApplyCommands(request.session, result.commands);
@@ -493,6 +559,13 @@ void HandleMessage(Client* client, const Message& request) {
         }
         case MsgKind::Reset: {
             CoreEngine::Instance().Reset(request.session);
+            // The chain dropped its buffer, so no preedit is left to select in.
+            std::lock_guard<std::mutex> lock(g_state_mutex);
+            const auto it = g_ui.find(request.session);
+            if (it != g_ui.end()) {
+                it->second.selected = 0;
+                it->second.composition.clear();
+            }
             return;
         }
         case MsgKind::UpdateContext: {

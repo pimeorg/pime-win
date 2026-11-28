@@ -245,10 +245,11 @@ void CandidateWindow::CreateFormats() {
 
 void CandidateWindow::ShowCandidates(const std::vector<CandidateItem>& items,
                                      int page, bool has_prev, bool has_next,
-                                     const RECT& caret) {
+                                     const RECT& caret, int selected) {
     if (!hwnd_) return;
     badge_ = false;
     page_ = page;
+    selected_ = selected;
     has_prev_ = has_prev;
     has_next_ = has_next;
     caret_ = caret;
@@ -541,6 +542,16 @@ void CandidateWindow::Paint() {
 
     for (size_t i = 0; i < items_.size(); ++i) {
         const ItemBox& box = items_[i];
+        if (selected_ == static_cast<int>(i)) {
+            D2D1_COLOR_F fill = palette.accent;
+            fill.a = dark_ ? 0.30f : 0.16f;
+            brush->SetColor(fill);
+            target_->FillRoundedRectangle(
+                D2D1::RoundedRect(box.rect, 6.0f, 6.0f), brush.Get());
+            brush->SetColor(palette.accent);
+            target_->DrawRoundedRectangle(
+                D2D1::RoundedRect(box.rect, 6.0f, 6.0f), brush.Get(), 1.0f);
+        }
         if (hot_ == static_cast<int>(i)) {
             brush->SetColor(palette.hover);
             target_->FillRoundedRectangle(
