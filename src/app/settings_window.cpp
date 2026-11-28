@@ -85,6 +85,7 @@ enum : int {
     kPreset = 70,      // kPreset + preset index
     kRestore = 79,
     kImportScheme = 80,
+    kImportPlugin = 81,
     kMenuItem = 100,
     kDictRow = 200,
     kPlugCard = 3000,   // kPlugCard + plugin index
@@ -139,6 +140,7 @@ struct Layout {
     int preset_count = 0;
     Box restore;
     Box import_scheme;
+    Box import_plugin;
     Box plug_view;
     std::vector<PlugRow> plug_rows;
     float plug_content = 0;
@@ -788,6 +790,7 @@ void BuildLayout(AppState& s) {
         }
         l.import_scheme = Box{right - 96.f, 102.f, right - 16.f, 128.f};
         l.restore = Box{right - 188.f, 102.f, right - 108.f, 128.f};
+        l.import_plugin = Box{right - 116.f, 224.f, right - 20.f, 250.f};
 
         l.plug_view = Box{left, 256.f, right, h - 84.f};
         l.plug_rows.clear();
@@ -945,6 +948,7 @@ int HitTest(const AppState& s, float x, float y) {
             return kRestore;
         }
         if (s.layout.import_scheme.Contains(x, y)) return kImportScheme;
+        if (s.layout.import_plugin.Contains(x, y)) return kImportPlugin;
         if (s.layout.plug_view.Contains(x, y)) {
             for (const PlugRow& row : s.layout.plug_rows) {
                 if (!row.card.Contains(x, y)) continue;
@@ -1395,8 +1399,10 @@ void DrawPluginsPage(AppState& s) {
              Box{x0 + 20.f, 226.f, x1 - 200.f, 248.f}, p.text);
     DrawText(s, s.f_small.Get(),
              std::to_wstring(s.edit_plugins.size()) + L" 个插件",
-             Box{x0 + 20.f, 226.f, x1 - 20.f, 248.f}, p.secondary,
+             Box{x0 + 20.f, 226.f, x1 - 128.f, 248.f}, p.secondary,
              DWRITE_TEXT_ALIGNMENT_TRAILING);
+    DrawButton(s, s.layout.import_plugin, L"导入插件…", kImportPlugin,
+               ButtonKind::Secondary);
     DrawLine(s, x0 + 20.f, 252.f, x1 - 20.f, 252.f, p.border, 1.f);
 
     const Box& view = s.layout.plug_view;
@@ -1897,6 +1903,95 @@ void MarkStructural(AppState& s) {
     }
 }
 
+// Where a new entry goes, mirroring tools/scheme_plugins.py: after the last
+// entry anchored to `after` (a disabled tombstone keeps its slot and can be
+// anchored to), else after the entry with that id, else after the last enabled
+// entry with the same role, else at the tail. An explicit empty `after` means
+// the chain head.
+int PluginInsertIndex(const std::vector<EditPlugin>& entries, bool after_set,
+                      const std::string& after, const std::string& role) {
+    if (after_set && after.empty()) return 0;
+    if (!after.empty()) {
+        for (int i = static_cast<int>(entries.size()) - 1; i >= 0; --i) {
+            if (entries[i].plugin.after_set &&
+                entries[i].plugin.after == after) {
+                return i + 1;
+            }
+        }
+        for (int i = 0; i < static_cast<int>(entries.size()); ++i) {
+            if (entries[i].plugin.id == after) return i + 1;
+        }
+    }
+    for (int i = static_cast<int>(entries.size()) - 1; i >= 0; --i) {
+        if (entries[i].enabled && entries[i].plugin.role == role) {
+            return i + 1;
+        }
+    }
+    return static_cast<int>(entries.size());
+}
+
+// The overlay may hold entries the base chain does not (imported plugins and
+// their tombstones). They go back to the slot their `after` names; an anchor
+// can be an entry inserted in this same pass, so insert the ones that resolve
+// and repeat until nothing is left.
+void MergeCustomEntries(AppState& s, const ChainDoc& doc) {
+    auto has_anchor = [&](const std::string& after) {
+        for (const EditPlugin& entry : s.edit_plugins) {
+            if (entry.plugin.id == after) return true;
+            if (entry.plugin.after_set && entry.plugin.after == after) {
+                return true;
+            }
+        }
+        return false;
+    };
+
+    struct Extra {
+        const ChainPlugin* plugin;
+        bool enabled;
+    };
+    std::vector<Extra> extra;
+    auto push_if_missing = [&](const ChainPlugin& plugin, bool enabled) {
+        for (const EditPlugin& entry : s.edit_plugins) {
+            if (entry.plugin.id == plugin.id) return;
+        }
+        extra.push_back({&plugin, enabled});
+    };
+    for (const ChainPlugin& plugin : doc.plugins) push_if_missing(plugin, true);
+    for (const ChainPlugin& plugin : doc.disabled) push_if_missing(plugin, false);
+
+    auto insert = [&](const Extra& item) {
+        EditPlugin entry;
+        entry.plugin = *item.plugin;
+        entry.enabled = item.enabled;
+        const int index = PluginInsertIndex(s.edit_plugins,
+                                            entry.plugin.after_set,
+                                            entry.plugin.after,
+                                            entry.plugin.role);
+        s.edit_plugins.insert(s.edit_plugins.begin() + index, std::move(entry));
+    };
+
+    while (!extra.empty()) {
+        std::vector<Extra> deferred;
+        bool progress = false;
+        for (const Extra& item : extra) {
+            if (item.plugin->after_set && !item.plugin->after.empty() &&
+                !has_anchor(item.plugin->after)) {
+                deferred.push_back(item);
+                continue;
+            }
+            insert(item);
+            progress = true;
+        }
+        extra = std::move(deferred);
+        if (!progress) {
+            // Anchors form a cycle or name entries outside the chain: keep the
+            // records and fall back to the role/tail slot.
+            for (const Extra& item : extra) insert(item);
+            extra.clear();
+        }
+    }
+}
+
 // Loads a scheme into the editor. When a user edit exists, the package's own
 // chain is used as the base so plugins added by an upgrade still show up.
 void LoadEditorFromScheme(AppState& s, const std::wstring& id) {
@@ -1938,11 +2033,14 @@ void LoadEditorFromScheme(AppState& s, const std::wstring& id) {
                 }
             }
             entry.enabled =
-                std::find(doc.disabled.begin(), doc.disabled.end(), plugin.id) ==
-                doc.disabled.end();
+                std::find_if(doc.disabled.begin(), doc.disabled.end(),
+                             [&](const ChainPlugin& disabled) {
+                                 return disabled.id == plugin.id;
+                             }) == doc.disabled.end();
         }
         s.edit_plugins.push_back(std::move(entry));
     }
+    if (merge) MergeCustomEntries(s, doc);
     AttachMeta(s);
     MarkStructural(s);
     s.plugins_loaded = true;
@@ -2085,7 +2183,7 @@ void ApplySettings(AppState& s, HWND window) {
                 if (entry.enabled) {
                     doc.plugins.push_back(entry.plugin);
                 } else {
-                    doc.disabled.push_back(entry.plugin.id);
+                    doc.disabled.push_back(entry.plugin);
                 }
             }
             const std::wstring dir =
@@ -2504,10 +2602,104 @@ void ImportScheme(AppState& s, HWND window) {
     Invalidate(s, window);
 }
 
+// Adds one plugin package the user picked to the scheme currently shown in the
+// editor. The package is copied into the scheme's user plugin directory and one
+// chain entry is inserted after the predecessor named by the manifest's
+// `after`, or after the last entry of the same role; no existing plugin or
+// entry is edited.
+void ImportPlugin(AppState& s, HWND window) {
+    if (!s.plugins_loaded || s.plugin_chain.empty()) {
+        s.plugin_status = L"请先在上方选择方案包";
+        s.plugin_status_ok = false;
+        Invalidate(s, window);
+        return;
+    }
+
+    BROWSEINFOW browse{};
+    browse.hwndOwner = window;
+    browse.lpszTitle = L"选择插件包目录（含 manifest.yaml）";
+    browse.ulFlags = BIF_RETURNONLYFSDIRS | BIF_NEWDIALOGSTYLE;
+    PIDLIST_ABSOLUTE item = SHBrowseForFolderW(&browse);
+    if (!item) return;
+    wchar_t path[MAX_PATH] = {};
+    const bool picked = SHGetPathFromIDListW(item, path) != FALSE;
+    CoTaskMemFree(item);
+    if (!picked) return;
+
+    PluginMeta meta;
+    std::string error;
+    if (!ReadPluginManifest(PathJoin(path, L"manifest.yaml"), &meta, &error)) {
+        s.plugin_status = L"导入失败：" + ToWide(error);
+        s.plugin_status_ok = false;
+        Invalidate(s, window);
+        return;
+    }
+
+    const std::string& plugin_id = meta.id;
+    for (const EditPlugin& entry : s.edit_plugins) {
+        if (entry.plugin.id != plugin_id) continue;
+        s.plugin_status =
+            L"插件「" + PluginName(plugin_id) + L"」已在流水线中";
+        s.plugin_status_ok = false;
+        Invalidate(s, window);
+        return;
+    }
+
+    const std::wstring scheme_id = ToWide(s.plugin_chain);
+    const std::wstring plugins_dir = PathJoin(
+        PathJoin(PathJoin(DataDirectory(), L"schemes"), scheme_id), L"plugins");
+    // The picked directory's own name becomes the package directory; manifest
+    // strings never take part in path building.
+    const std::wstring target = PathJoin(plugins_dir, PathFileName(path));
+    if (DirectoryExists(target)) {
+        const std::wstring question =
+            L"插件包「" + PathFileName(path) + L"」已存在，覆盖？";
+        if (MessageBoxW(window, question.c_str(), L"导入插件包",
+                        MB_ICONQUESTION | MB_YESNO) != IDYES) {
+            return;
+        }
+        DeleteDirectory(target);
+    }
+    if (!EnsureDirectory(plugins_dir) || !CopyDirectory(path, target)) {
+        s.plugin_status = L"导入失败：无法复制插件包";
+        s.plugin_status_ok = false;
+        Invalidate(s, window);
+        return;
+    }
+
+    // The package is on disk now, so the catalog has to see it before the new
+    // row can be matched to its settings.
+    s.catalog_loaded = false;
+    EnsureCatalog(s);
+
+    EditPlugin entry;
+    entry.plugin.id = plugin_id;
+    entry.plugin.version = meta.version;
+    entry.plugin.role = meta.role;
+    if (meta.after_set) {
+        entry.plugin.after_set = true;
+        entry.plugin.after = meta.after;
+    }
+    const int index = PluginInsertIndex(s.edit_plugins, entry.plugin.after_set,
+                                        entry.plugin.after, entry.plugin.role);
+    s.edit_plugins.insert(s.edit_plugins.begin() + index, std::move(entry));
+    AttachMeta(s);
+    MarkStructural(s);
+
+    s.plugin_dirty = true;
+    s.plugin_status =
+        L"已导入插件「" + PluginName(plugin_id) + L"」，保存后生效";
+    s.plugin_status_ok = true;
+    Invalidate(s, window);
+}
+
 void ActivateById(AppState& s, HWND window, int id) {
     switch (id) {
         case kImportScheme:
             ImportScheme(s, window);
+            return;
+        case kImportPlugin:
+            ImportPlugin(s, window);
             return;
         case kNavGeneral:
         case kNavAppearance:
@@ -2755,6 +2947,7 @@ std::vector<int> FocusOrder(const AppState& s) {
             order.push_back(kRestore);
         }
         order.push_back(kImportScheme);
+        order.push_back(kImportPlugin);
         for (const PlugRow& row : s.layout.plug_rows) {
             order.push_back(kPlugCard + row.plugin);
             if (!s.edit_plugins[row.plugin].structural) {

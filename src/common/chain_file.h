@@ -30,14 +30,21 @@ struct ChainPlugin {
     std::string version;
     std::string alias;
     std::string role;
+    // Direct predecessor recorded by the scheme chain; only meaningful in a
+    // host-owned chain file. `after_set` with an empty `after` means the entry
+    // must run first; unset means the manager falls back to the last entry with
+    // the same role.
+    bool after_set = false;
+    std::string after;
     std::vector<ChainSetting> settings;
 };
 
 struct ChainDoc {
     // Only set for the settings UI's custom chain: the preset it came from.
     std::string base;
-    // Plugins the user switched off; kept so the UI can list them dimmed.
-    std::vector<std::string> disabled;
+    // Plugins the user switched off. Kept as full records so a disabled plugin
+    // still keeps its slot and anchors for later insertions.
+    std::vector<ChainPlugin> disabled;
     std::vector<ChainPlugin> plugins;
 };
 
@@ -68,6 +75,11 @@ struct PluginMeta {
     std::string after;
     std::vector<PluginSettingSpec> settings;
 };
+
+// Reads one plugin package's manifest.yaml and returns its metadata. Fails
+// with a message when the file cannot be read or lacks id/role.
+bool ReadPluginManifest(const std::wstring& path, PluginMeta* out,
+                        std::string* error);
 
 // Scans <plugins_dir>/*/manifest.yaml. A package that fails to parse is
 // skipped: the settings UI can still show the plugin, just without controls.

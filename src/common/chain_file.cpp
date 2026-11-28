@@ -41,6 +41,13 @@ struct Cursor {
         return true;
     }
 
+    // Major of the next CBOR item, without consuming it.
+    bool PeekMajor(uint8_t* major) {
+        if (!Need(1)) return false;
+        *major = data[off] >> 5;
+        return true;
+    }
+
     bool Head(uint8_t* major, uint64_t* value) {
         uint8_t first = 0;
         if (!Byte(&first)) return false;
@@ -160,46 +167,54 @@ struct Cursor {
     }
 };
 
+bool ReadPluginEntry(Cursor* c, ChainPlugin* plugin) {
+    uint8_t major = 0;
+    uint64_t fields = 0;
+    if (!c->Head(&major, &fields) || major != 5) return false;
+    for (uint64_t f = 0; f < fields; ++f) {
+        std::string key;
+        if (!c->Text(&key)) return false;
+        if (key == "id") {
+            if (!c->Text(&plugin->id)) return false;
+        } else if (key == "version") {
+            if (!c->Text(&plugin->version)) return false;
+        } else if (key == "alias") {
+            if (!c->Text(&plugin->alias)) return false;
+        } else if (key == "role") {
+            if (!c->Text(&plugin->role)) return false;
+        } else if (key == "after") {
+            if (!c->Text(&plugin->after)) return false;
+            plugin->after_set = true;
+        } else if (key == "settings") {
+            uint8_t settings_major = 0;
+            uint64_t settings_count = 0;
+            if (!c->Head(&settings_major, &settings_count) ||
+                settings_major != 5) {
+                return false;
+            }
+            for (uint64_t s = 0; s < settings_count; ++s) {
+                ChainSetting setting;
+                if (!c->Text(&setting.key)) return false;
+                ChainValue value;
+                if (c->Scalar(&value)) {
+                    setting.value = std::move(value);
+                    plugin->settings.push_back(std::move(setting));
+                }
+            }
+        } else if (!c->Skip(0)) {
+            return false;
+        }
+    }
+    return true;
+}
+
 bool ReadPlugins(Cursor* c, std::vector<ChainPlugin>* out) {
     uint8_t major = 0;
     uint64_t count = 0;
     if (!c->Head(&major, &count) || major != 4) return false;
     for (uint64_t i = 0; i < count; ++i) {
-        uint8_t entry_major = 0;
-        uint64_t fields = 0;
-        if (!c->Head(&entry_major, &fields) || entry_major != 5) return false;
         ChainPlugin plugin;
-        for (uint64_t f = 0; f < fields; ++f) {
-            std::string key;
-            if (!c->Text(&key)) return false;
-            if (key == "id") {
-                if (!c->Text(&plugin.id)) return false;
-            } else if (key == "version") {
-                if (!c->Text(&plugin.version)) return false;
-            } else if (key == "alias") {
-                if (!c->Text(&plugin.alias)) return false;
-            } else if (key == "role") {
-                if (!c->Text(&plugin.role)) return false;
-            } else if (key == "settings") {
-                uint8_t settings_major = 0;
-                uint64_t settings_count = 0;
-                if (!c->Head(&settings_major, &settings_count) ||
-                    settings_major != 5) {
-                    return false;
-                }
-                for (uint64_t s = 0; s < settings_count; ++s) {
-                    ChainSetting setting;
-                    if (!c->Text(&setting.key)) return false;
-                    ChainValue value;
-                    if (c->Scalar(&value)) {
-                        setting.value = std::move(value);
-                        plugin.settings.push_back(std::move(setting));
-                    }
-                }
-            } else if (!c->Skip(0)) {
-                return false;
-            }
-        }
+        if (!ReadPluginEntry(c, &plugin)) return false;
         if (!plugin.id.empty()) out->push_back(std::move(plugin));
     }
     return true;
@@ -255,6 +270,7 @@ void PutPlugin(std::vector<uint8_t>* out, const ChainPlugin& plugin) {
     if (!plugin.version.empty()) ++count;
     if (!plugin.alias.empty()) ++count;
     if (!plugin.role.empty()) ++count;
+    if (plugin.after_set) ++count;
     if (!plugin.settings.empty()) ++count;
     PutHead(out, 5, count);
     PutText(out, "id");
@@ -270,6 +286,10 @@ void PutPlugin(std::vector<uint8_t>* out, const ChainPlugin& plugin) {
     if (!plugin.role.empty()) {
         PutText(out, "role");
         PutText(out, plugin.role);
+    }
+    if (plugin.after_set) {
+        PutText(out, "after");
+        PutText(out, plugin.after);
     }
     if (!plugin.settings.empty()) {
         PutText(out, "settings");
@@ -543,9 +563,18 @@ bool ReadChainFile(const std::wstring& path, ChainDoc* out, std::string* error) 
             uint64_t list_count = 0;
             if (!cursor.Head(&list_major, &list_count) || list_major != 4) break;
             for (uint64_t d = 0; d < list_count; ++d) {
-                std::string id;
-                if (!cursor.Text(&id)) break;
-                doc.disabled.push_back(std::move(id));
+                // A legacy overlay stored the ids as plain strings; new writes
+                // store the full record so a tombstone keeps its slot.
+                ChainPlugin plugin;
+                uint8_t entry_major = 0;
+                if (!cursor.PeekMajor(&entry_major) || entry_major == 3) {
+                    if (!cursor.Text(&plugin.id)) break;
+                } else if (entry_major == 5) {
+                    if (!ReadPluginEntry(&cursor, &plugin)) break;
+                } else {
+                    break;
+                }
+                doc.disabled.push_back(std::move(plugin));
             }
         } else if (!cursor.Skip(0)) {
             break;
@@ -581,7 +610,7 @@ bool WriteChainFile(const std::wstring& path, const ChainDoc& doc,
     if (!doc.disabled.empty()) {
         PutText(&bytes, "disabled");
         PutHead(&bytes, 4, doc.disabled.size());
-        for (const std::string& id : doc.disabled) PutText(&bytes, id);
+        for (const ChainPlugin& plugin : doc.disabled) PutPlugin(&bytes, plugin);
     }
     PutText(&bytes, "plugins");
     PutHead(&bytes, 4, doc.plugins.size());
@@ -663,6 +692,24 @@ void ScanSchemeDir(const std::wstring& root, bool user,
 }
 
 }  // namespace
+
+bool ReadPluginManifest(const std::wstring& path, PluginMeta* out,
+                        std::string* error) {
+    std::vector<uint8_t> bytes;
+    if (!ReadFileBytes(path, &bytes)) {
+        if (error) *error = "cannot read manifest";
+        return false;
+    }
+    const std::string text(reinterpret_cast<const char*>(bytes.data()),
+                           bytes.size());
+    PluginMeta meta = ParseManifest(text);
+    if (meta.id.empty() || meta.role.empty()) {
+        if (error) *error = "manifest lacks id or role";
+        return false;
+    }
+    *out = std::move(meta);
+    return true;
+}
 
 std::vector<PluginMeta> LoadPluginCatalog(const std::wstring& plugins_dir) {
     std::vector<PluginMeta> catalog;
