@@ -445,6 +445,10 @@ PluginMeta ParseManifest(std::string_view text) {
             else if (key == "version") meta.version = value;
             else if (key == "role") meta.role = value;
             else if (key == "description") meta.description = value;
+            else if (key == "after") {
+                meta.after_set = true;
+                if (value != "null") meta.after = value;
+            }
         }
     }
     return meta;

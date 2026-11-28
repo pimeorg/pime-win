@@ -61,6 +61,11 @@ struct PluginMeta {
     std::string version;
     std::string role;
     std::string description;
+    // Default predecessor for importing this plugin into a scheme. Empty with
+    // `after_set` means "must be first"; unset means fall back to the last
+    // entry with the same role.
+    bool after_set = false;
+    std::string after;
     std::vector<PluginSettingSpec> settings;
 };
 
