@@ -15,6 +15,7 @@
 #include <unordered_map>
 #include <utility>
 
+#include "common/chain_file.h"
 #include "common/log.h"
 #include "common/store_key.h"
 #include "common/win_util.h"
@@ -61,15 +62,14 @@ std::string CorePath(const std::wstring& path) {
     return ToUtf8(path);
 }
 
-// The settings window writes its adjusted chain into the per-user data
-// directory, which is writable even when the install lives under Program
-// Files. A user chain shadows a bundled one with the same name.
-std::wstring ChainPath(const std::wstring& resources, const std::wstring& data,
-                       const std::string& chain) {
-    const std::wstring name = ToWide(chain);
-    const std::wstring user = PathJoin(PathJoin(data, L"chains"), name);
-    if (FileExists(user)) return user;
-    return PathJoin(PathJoin(resources, L"chains"), name);
+// The settings store the active scheme as "<id>.cbor"; the chain itself lives
+// inside the scheme package (or a user edit in the data directory).
+std::string ChainStem(const std::string& chain) {
+    std::string stem = chain;
+    if (stem.size() > 5 && stem.compare(stem.size() - 5, 5, ".cbor") == 0) {
+        stem.resize(stem.size() - 5);
+    }
+    return stem;
 }
 
 pime_status SinkComposition(void* ud, const pime_composition* value);
@@ -226,14 +226,26 @@ struct CoreEngine::Impl {
         return loaded > 0;
     }
 
+    // A scheme package carries the plugins its chain references. Loading is
+    // idempotent in core (same id/version/code hash returns OK), so switching
+    // schemes can load the new package without unloading the previous one.
+    void LoadSchemePlugins(const std::string& chain) {
+        for (const std::wstring& dir :
+             SchemePluginDirs(config.resources_dir, config.data_dir,
+                              ChainStem(chain))) {
+            LoadPlugins(core, dir);
+        }
+    }
+
     bool ActivateChain(pime_core* instance, const std::string& chain,
                        uint64_t* out_generation) {
+        LoadSchemePlugins(chain);
         std::vector<uint8_t> bytes;
-        const std::wstring path =
-            ChainPath(config.resources_dir, config.data_dir, chain);
-        if (!ReadFileBytes(path, &bytes)) {
+        const std::wstring path = SchemeChainPath(
+            config.resources_dir, config.data_dir, ChainStem(chain));
+        if (path.empty() || !ReadFileBytes(path, &bytes)) {
             WriteLog(LogLevel::Error, "chain",
-                     "cannot read " + ToUtf8(path));
+                     "cannot read scheme " + ChainStem(chain));
             return false;
         }
         uint64_t built = 0;
@@ -327,8 +339,17 @@ struct CoreEngine::Impl {
                                  static_cast<uint32_t>(std::strlen(capability)), 1);
         }
 
-        LoadPlugins(core, PathJoin(config.resources_dir, L"plugins"));
-        if (!ActivateChain(core, config.chain, &generation)) return false;
+        if (!ActivateChain(core, config.chain, &generation)) {
+            // A scheme the user installed may have been removed; pinyin is
+            // always part of the default install, so fall back to it.
+            if (config.chain == "pinyin.cbor" ||
+                !ActivateChain(core, "pinyin.cbor", &generation)) {
+                return false;
+            }
+            WriteLog(LogLevel::Warn, "chain",
+                     "fell back to pinyin from " + config.chain);
+            config.chain = "pinyin.cbor";
+        }
 
         uint32_t major = 0, minor = 0, patch = 0;
         pime_core_version(&major, &minor, &patch);
@@ -505,15 +526,11 @@ std::wstring CoreEngine::version() const {
 std::vector<std::wstring> CoreEngine::chains() const {
     std::vector<std::wstring> names;
     if (!impl_) return names;
-    const std::wstring pattern =
-        PathJoin(PathJoin(impl_->config.resources_dir, L"chains"), L"*.cbor");
-    WIN32_FIND_DATAW data{};
-    HANDLE find = FindFirstFileW(pattern.c_str(), &data);
-    if (find == INVALID_HANDLE_VALUE) return names;
-    do {
-        names.push_back(data.cFileName);
-    } while (FindNextFileW(find, &data));
-    FindClose(find);
+    for (const SchemeInfo& scheme :
+         ListSchemePackages(impl_->config.resources_dir,
+                            impl_->config.data_dir)) {
+        names.push_back(ToWide(scheme.id) + L".cbor");
+    }
     return names;
 }
 

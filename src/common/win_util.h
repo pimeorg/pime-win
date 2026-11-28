@@ -19,6 +19,9 @@ std::wstring PathFileName(const std::wstring& path);
 bool DirectoryExists(const std::wstring& path);
 bool FileExists(const std::wstring& path);
 bool EnsureDirectory(const std::wstring& path);
+// Recursive copy into an existing directory; creates subdirectories as needed.
+bool CopyDirectory(const std::wstring& source, const std::wstring& target);
+bool DeleteDirectory(const std::wstring& path);
 bool ReadFileBytes(const std::wstring& path, std::vector<uint8_t>* out);
 bool WriteFileBytes(const std::wstring& path,
                     const std::vector<uint8_t>& bytes);

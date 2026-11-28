@@ -1,0 +1,13 @@
+# 仓颉方案包（可选，不进入 Windows 默认分发）
+api: 1
+id: cangjie
+name: 仓颉
+description: 仓颉（桌面）
+version: 1.0.0
+chain: cangjie.cbor
+plugins:
+  - { id: pime-keymap-default, version: 1.3.0 }
+  - { id: pime-cangjie-parse, version: 1.0.1 }
+  - { id: pime-cangjie-translate, version: 1.0.0 }
+  - { id: pime-rank-default, version: 1.0.0 }
+  - { id: pime-candidates-format, version: 1.5.1 }

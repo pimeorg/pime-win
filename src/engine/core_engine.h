@@ -56,9 +56,9 @@ struct KeyResult {
 };
 
 struct EngineConfig {
-    std::wstring resources_dir;  // contains plugins/ and chains/
+    std::wstring resources_dir;  // contains schemes/ (bundled packages)
     std::wstring data_dir;       // writable per-user directory
-    std::string chain = "default.cbor";
+    std::string chain = "pinyin.cbor";
     uint32_t page_size = 6;
     uint32_t candidate_budget = 96;
 };

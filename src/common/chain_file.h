@@ -68,4 +68,55 @@ struct PluginMeta {
 // skipped: the settings UI can still show the plugin, just without controls.
 std::vector<PluginMeta> LoadPluginCatalog(const std::wstring& plugins_dir);
 
+// ---- scheme packages -------------------------------------------------------
+//
+// A scheme package is a self-contained directory:
+//
+//   <root>/schemes/<id>/
+//     scheme.yaml        metadata + the plugin manifest
+//     <chain>.cbor       the chain this scheme activates
+//     plugins/<pkg>/     copies of every plugin the chain references
+//
+// Bundled packages live next to the executable; user-installed packages and
+// edited chains live in %LOCALAPPDATA%\PIME\schemes. A user package with the
+// same id shadows the bundled one.
+struct SchemeInfo {
+    std::string id;
+    std::string name;
+    std::string description;
+    std::string version;
+    std::string chain;   // chain file name inside the package
+    std::wstring dir;    // package directory
+    bool user = false;   // loaded from the writable data directory
+};
+
+bool ReadSchemeFile(const std::wstring& path, SchemeInfo* out,
+                    std::string* error);
+
+// Bundled packages first, then user packages (which replace same-id entries).
+std::vector<SchemeInfo> ListSchemePackages(const std::wstring& resources_dir,
+                                           const std::wstring& data_dir);
+
+// Chain to activate for a scheme id. A user edit (schemes/<id>/custom.cbor)
+// wins over the package's own chain; an empty result means "not installed".
+std::wstring SchemeChainPath(const std::wstring& resources_dir,
+                             const std::wstring& data_dir,
+                             const std::string& id);
+
+// The package's own chain, ignoring a user edit. Used by the editor to merge
+// new plugins from an upgraded package into the user's saved pipeline.
+std::wstring SchemeBaseChainPath(const std::wstring& resources_dir,
+                                 const std::wstring& data_dir,
+                                 const std::string& id);
+
+// Plugin package directories a scheme carries, user copy first. Falls back to
+// the legacy shared plugins/ directory when no scheme package is installed.
+std::vector<std::wstring> SchemePluginDirs(const std::wstring& resources_dir,
+                                           const std::wstring& data_dir,
+                                           const std::string& id);
+
+// Union of every installed scheme's plugin manifests, newest version first.
+std::vector<PluginMeta> LoadPluginCatalogFromSchemes(
+    const std::wstring& resources_dir, const std::wstring& data_dir);
+
 }  // namespace pimewin

@@ -4,6 +4,7 @@
 #include <d2d1.h>
 #include <dwrite.h>
 #include <dwmapi.h>
+#include <shlobj.h>
 #include <windowsx.h>
 #include <wrl/client.h>
 
@@ -83,6 +84,7 @@ enum : int {
     kDictRefresh = 66,
     kPreset = 70,      // kPreset + preset index
     kRestore = 79,
+    kImportScheme = 80,
     kMenuItem = 100,
     kDictRow = 200,
     kPlugCard = 3000,   // kPlugCard + plugin index
@@ -136,6 +138,7 @@ struct Layout {
     Box preset[8];
     int preset_count = 0;
     Box restore;
+    Box import_scheme;
     Box plug_view;
     std::vector<PlugRow> plug_rows;
     float plug_content = 0;
@@ -217,17 +220,18 @@ struct AppState {
 
     Settings settings;
     Settings saved;
-    std::vector<std::wstring> chains;
+    std::vector<SchemeInfo> schemes;
 
-    // Plugin-chain editor. `edit_plugins` is the working copy; `plugin_chain`
-    // is the file it currently represents ("default", "custom", ...) and
-    // `plugin_choice` the preset the chips highlight.
+    // Scheme editor. `edit_plugins` is the working copy; `plugin_chain` is the
+    // scheme id it currently represents and `plugin_choice` the chip that is
+    // highlighted. `plugin_custom` means a user edit shadows the package chain.
     std::vector<EditPlugin> edit_plugins;
     std::vector<PluginMeta> catalog;
     bool catalog_loaded = false;
     bool plugins_loaded = false;
     std::string plugin_chain;
     std::string plugin_choice;
+    bool plugin_custom = false;
     bool plugin_dirty = false;
     int plugin_selected = -1;
     float plugin_scroll = 0;
@@ -423,50 +427,6 @@ bool IsInstalled() {
                         nullptr, path, &size) == ERROR_SUCCESS;
 }
 
-// The order the scheme list is shown in: the common schemes first, then
-// anything else (a user-dropped chain) alphabetically at the end.
-int ChainOrder(const std::wstring& name) {
-    static const wchar_t* const kOrder[] = {
-        L"default",          L"custom",          L"shuangpin-xiaohe",
-        L"shuangpin-ziranma", L"shuangpin-microsoft", L"shuangpin-sogou",
-        L"wubi86",           L"cangjie",         L"english",
-    };
-    for (int i = 0; i < static_cast<int>(std::size(kOrder)); ++i) {
-        if (name == kOrder[i]) return i;
-    }
-    return static_cast<int>(std::size(kOrder));
-}
-
-void AppendChains(const std::wstring& dir, std::vector<std::wstring>* names) {
-    const std::wstring pattern = PathJoin(dir, L"*.cbor");
-    WIN32_FIND_DATAW data{};
-    HANDLE find = FindFirstFileW(pattern.c_str(), &data);
-    if (find == INVALID_HANDLE_VALUE) return;
-    do {
-        std::wstring name = data.cFileName;
-        const size_t dot = name.rfind(L'.');
-        if (dot != std::wstring::npos) name.resize(dot);
-        if (std::find(names->begin(), names->end(), name) == names->end()) {
-            names->push_back(name);
-        }
-    } while (FindNextFileW(find, &data));
-    FindClose(find);
-}
-
-// Bundled chains plus the user's adjusted chain in %LOCALAPPDATA%\PIME\chains.
-std::vector<std::wstring> ListChains() {
-    std::vector<std::wstring> names;
-    AppendChains(PathJoin(ModuleDirectory(nullptr), L"chains"), &names);
-    AppendChains(PathJoin(DataDirectory(), L"chains"), &names);
-    std::sort(names.begin(), names.end(), [](const std::wstring& a,
-                                             const std::wstring& b) {
-        const int oa = ChainOrder(a);
-        const int ob = ChainOrder(b);
-        return oa != ob ? oa < ob : a < b;
-    });
-    return names;
-}
-
 std::wstring ChainName(const std::wstring& file) {
     std::wstring name = file;
     if (name.size() > 5 && name.substr(name.size() - 5) == L".cbor") {
@@ -475,20 +435,41 @@ std::wstring ChainName(const std::wstring& file) {
     return name;
 }
 
-// What the dropdown shows. The file stem is the stable identity; this is only
-// the human-readable label.
-std::wstring ChainLabel(const std::wstring& file) {
-    const std::wstring name = ChainName(file);
-    if (name == L"default") return L"全拼";
-    if (name == L"custom") return L"自定义";
-    if (name == L"shuangpin-xiaohe") return L"双拼 · 小鹤";
-    if (name == L"shuangpin-ziranma") return L"双拼 · 自然码";
-    if (name == L"shuangpin-microsoft") return L"双拼 · 微软";
-    if (name == L"shuangpin-sogou") return L"双拼 · 搜狗";
-    if (name == L"wubi86") return L"五笔 86";
-    if (name == L"cangjie") return L"仓颉";
-    if (name == L"english") return L"英文补全";
-    return name;
+// Bundled scheme packages plus the user's installs in
+// %LOCALAPPDATA%\PIME\schemes. The scheme id is the stable identity.
+std::vector<SchemeInfo> ListSchemes() {
+    return ListSchemePackages(ModuleDirectory(nullptr), DataDirectory());
+}
+
+const SchemeInfo* FindScheme(const AppState& s, const std::wstring& id) {
+    for (const SchemeInfo& scheme : s.schemes) {
+        if (ToWide(scheme.id) == id) return &scheme;
+    }
+    return nullptr;
+}
+
+// What the dropdown shows; the id is the identity, this is only the label.
+std::wstring SchemeName(const AppState& s, const std::wstring& id) {
+    const SchemeInfo* scheme = FindScheme(s, id);
+    if (!scheme) return id;
+    if (!scheme->name.empty()) return ToWide(scheme->name);
+    if (!scheme->description.empty()) return ToWide(scheme->description);
+    return id;
+}
+
+std::wstring SchemeName(const AppState& s, const std::string& id) {
+    return SchemeName(s, ToWide(id));
+}
+
+// A user edit of a scheme's pipeline lives next to the package in the data
+// directory and shadows the bundled chain.
+std::wstring SchemeOverlayPath(const std::wstring& id) {
+    return PathJoin(PathJoin(PathJoin(DataDirectory(), L"schemes"), id),
+                    L"custom.cbor");
+}
+
+bool HasSchemeOverlay(const std::wstring& id) {
+    return FileExists(SchemeOverlayPath(id));
 }
 
 // Human labels for the pipeline roles, in the order a chain runs them.
@@ -665,16 +646,16 @@ const PluginMeta* FindMeta(const AppState& s, const std::string& id,
 
 std::vector<std::wstring> PresetList(const AppState& s) {
     std::vector<std::wstring> presets;
-    for (const std::wstring& name : s.chains) {
-        if (name != L"custom") presets.push_back(name);
+    for (const SchemeInfo& scheme : s.schemes) {
+        presets.push_back(ToWide(scheme.id));
     }
     return presets;
 }
 
 int ChainIndex(const AppState& s) {
     const std::wstring current = ChainName(s.settings.chain);
-    for (size_t i = 0; i < s.chains.size(); ++i) {
-        if (s.chains[i] == current) return static_cast<int>(i);
+    for (size_t i = 0; i < s.schemes.size(); ++i) {
+        if (ToWide(s.schemes[i].id) == current) return static_cast<int>(i);
     }
     return 0;
 }
@@ -805,7 +786,8 @@ void BuildLayout(AppState& s) {
             l.preset[i] = Box{chip_left, chip_top, chip_left + chip_w,
                               chip_top + 30.f};
         }
-        l.restore = Box{right - 92.f, 102.f, right - 16.f, 128.f};
+        l.import_scheme = Box{right - 96.f, 102.f, right - 16.f, 128.f};
+        l.restore = Box{right - 188.f, 102.f, right - 108.f, 128.f};
 
         l.plug_view = Box{left, 256.f, right, h - 84.f};
         l.plug_rows.clear();
@@ -899,7 +881,7 @@ void BuildLayout(AppState& s) {
         const Box& anchor =
             s.menu == Menu::Chain ? l.chain : l.page_size;
         const int count = s.menu == Menu::Chain
-                              ? static_cast<int>(s.chains.size())
+                              ? static_cast<int>(s.schemes.size())
                               : 7;
         const float height = 12.f + count * 34.f;
         Box menu{anchor.l, anchor.b + 4.f, anchor.l + anchor.W(),
@@ -958,10 +940,11 @@ int HitTest(const AppState& s, float x, float y) {
         for (int i = 0; i < s.layout.preset_count; ++i) {
             if (s.layout.preset[i].Contains(x, y)) return kPreset + i;
         }
-        if ((s.plugin_dirty || s.plugin_chain == "custom") &&
+        if ((s.plugin_dirty || s.plugin_custom) &&
             s.layout.restore.Contains(x, y)) {
             return kRestore;
         }
+        if (s.layout.import_scheme.Contains(x, y)) return kImportScheme;
         if (s.layout.plug_view.Contains(x, y)) {
             for (const PlugRow& row : s.layout.plug_rows) {
                 if (!row.card.Contains(x, y)) continue;
@@ -1100,7 +1083,7 @@ void DrawSidebar(AppState& s) {
 
     const Page pages[5] = {Page::General, Page::Appearance, Page::Plugins,
                            Page::Dictionary, Page::About};
-    const wchar_t* names[5] = {L"常规", L"外观", L"插件", L"词库", L"关于"};
+    const wchar_t* names[5] = {L"常规", L"外观", L"方案包", L"词库", L"关于"};
     const int ids[5] = {kNavGeneral, kNavAppearance, kNavPlugins,
                         kNavDictionary, kNavAbout};
     for (int i = 0; i < 5; ++i) {
@@ -1151,11 +1134,10 @@ void DrawGeneralPage(AppState& s) {
     const Box card1{x0, 96.f, x1, 298.f};
     DrawCard(s, card1);
 
-    DrawRowLabel(s, card1, 110.f, L"输入方案", L"选择 assets/chains 目录中的插件链");
+    DrawRowLabel(s, card1, 110.f, L"输入方案", L"选择已安装的方案包");
     DrawSelect(s, s.layout.chain,
-               ChainLabel(s.chains.empty() ? s.settings.chain
-                                           : s.chains[ChainIndex(s)]),
-               kChain, s.menu == Menu::Chain);
+               SchemeName(s, ChainName(s.settings.chain)), kChain,
+               s.menu == Menu::Chain);
     DrawLine(s, card1.l + 20.f, 168.f, card1.r - 20.f, 168.f, p.border, 1.f);
 
     DrawRowLabel(s, card1, 168.f, L"候选每页", L"每页显示的候选数量");
@@ -1369,22 +1351,24 @@ void DrawPluginsPage(AppState& s) {
     const float x0 = kSidebar + kMargin;
     const float x1 = s.width - kMargin;
     const std::vector<std::wstring> presets = PresetList(s);
-    const bool customized = s.plugin_dirty || s.plugin_chain == "custom";
+    const bool customized = s.plugin_dirty || s.plugin_custom;
 
     // Preset card.
     const Box card1{x0, 92.f, x1, 204.f};
     DrawCard(s, card1);
-    DrawText(s, s.f_section.Get(), L"方案预设",
-             Box{x0 + 20.f, 100.f, x1 - 210.f, 118.f}, p.text);
-    DrawText(s, s.f_small.Get(), L"选一个起点，再按需开关插件、微调参数",
-             Box{x0 + 20.f, 117.f, x1 - 110.f, 131.f}, p.secondary);
+    DrawText(s, s.f_section.Get(), L"选择方案包",
+             Box{x0 + 20.f, 100.f, x1 - 310.f, 118.f}, p.text);
+    DrawText(s, s.f_small.Get(), L"切换后点「保存并应用」生效",
+             Box{x0 + 20.f, 117.f, x1 - 200.f, 131.f}, p.secondary);
     if (customized) {
         DrawText(s, s.f_badge.Get(), L"已自定义",
-                 Box{x1 - 196.f, 104.f, x1 - 104.f, 126.f}, p.accent,
+                 Box{x1 - 300.f, 104.f, x1 - 200.f, 126.f}, p.accent,
                  DWRITE_TEXT_ALIGNMENT_TRAILING);
         DrawButton(s, s.layout.restore, L"还原", kRestore,
                    ButtonKind::Secondary);
     }
+    DrawButton(s, s.layout.import_scheme, L"导入…", kImportScheme,
+               ButtonKind::Secondary);
     for (int i = 0; i < s.layout.preset_count; ++i) {
         const Box& chip = s.layout.preset[i];
         const bool selected =
@@ -1396,7 +1380,7 @@ void DrawPluginsPage(AppState& s) {
                                                            : p.border),
                   selected ? 1.4f : 1.f);
         DrawText(s, selected ? s.f_button.Get() : s.f_value.Get(),
-                 ChainLabel(presets[i]),
+                 SchemeName(s, presets[i]),
                  Box{chip.l + 8.f, chip.t, chip.r - 8.f, chip.b},
                  selected ? p.accent : p.text, DWRITE_TEXT_ALIGNMENT_CENTER);
         if (selected && s.plugin_dirty) {
@@ -1597,7 +1581,7 @@ void DrawAboutPage(AppState& s) {
     const Row rows[] = {
         {L"版本", kVersion},
         {L"输入法内核", L"pime-core（WAMR 插件运行时）"},
-        {L"输入方案", ChainLabel(s.settings.chain)},
+        {L"输入方案", SchemeName(s, ChainName(s.settings.chain))},
         {L"日志目录", DataDirectory()},
         {L"许可证", L"Apache License 2.0"},
     };
@@ -1773,12 +1757,12 @@ void DrawMenu(AppState& s) {
 
     if (s.menu == Menu::Chain) {
         const int selected = ChainIndex(s);
-        for (size_t i = 0; i < s.chains.size(); ++i) {
+        for (size_t i = 0; i < s.schemes.size(); ++i) {
             const Box item = ItemBox(s, static_cast<int>(i));
             const bool hot = s.mouse_in && item.Contains(s.mx, s.my);
             if (hot) FillBox(s, item, 6.f, p.accent_soft);
             const bool current = static_cast<int>(i) == selected;
-            DrawText(s, s.f_value.Get(), ChainLabel(s.chains[i]),
+            DrawText(s, s.f_value.Get(), SchemeName(s, s.schemes[i].id),
                      Box{item.l + 12.f, item.t, item.r - 32.f, item.b},
                      current ? p.accent : p.text);
             if (current) {
@@ -1821,8 +1805,8 @@ void Draw(AppState& s) {
             DrawAppearancePage(s);
             break;
         case Page::Plugins:
-            DrawPageHeader(s, L"插件",
-                           L"方案由一串插件按顺序组合而成；点开任一插件即可调参");
+            DrawPageHeader(s, L"方案包",
+                           L"方案包 = 链 + 插件；点开任一插件即可开关、调参");
             DrawPluginsPage(s);
             break;
         case Page::Dictionary:
@@ -1851,20 +1835,28 @@ void Invalidate(AppState& s, HWND window) {
 void EnsureCatalog(AppState& s) {
     if (s.catalog_loaded) return;
     s.catalog =
-        LoadPluginCatalog(PathJoin(ModuleDirectory(nullptr), L"plugins"));
+        LoadPluginCatalogFromSchemes(ModuleDirectory(nullptr), DataDirectory());
     s.catalog_loaded = true;
 }
 
-// Prefers the writable user directory, matching the engine's lookup order.
-bool ReadStemDoc(const std::string& stem, ChainDoc* doc) {
-    const std::wstring name = ToWide(stem) + L".cbor";
-    std::wstring path =
-        PathJoin(PathJoin(DataDirectory(), L"chains"), name);
-    if (!FileExists(path)) {
-        path = PathJoin(PathJoin(ModuleDirectory(nullptr), L"chains"), name);
-    }
+bool ReadChainAt(const std::wstring& path, ChainDoc* doc) {
+    if (path.empty()) return false;
     std::string error;
     return ReadChainFile(path, doc, &error);
+}
+
+// The chain the engine would activate for a scheme: a user edit wins.
+bool ReadSchemeChain(const std::wstring& id, ChainDoc* doc) {
+    return ReadChainAt(
+        SchemeChainPath(ModuleDirectory(nullptr), DataDirectory(), ToUtf8(id)),
+        doc);
+}
+
+// The package's own chain, used to merge in plugins an upgrade added.
+bool ReadSchemeBaseChain(const std::wstring& id, ChainDoc* doc) {
+    return ReadChainAt(SchemeBaseChainPath(ModuleDirectory(nullptr),
+                                           DataDirectory(), ToUtf8(id)),
+                       doc);
 }
 
 void AttachMeta(AppState& s) {
@@ -1905,7 +1897,9 @@ void MarkStructural(AppState& s) {
     }
 }
 
-void LoadPluginsEditor(AppState& s) {
+// Loads a scheme into the editor. When a user edit exists, the package's own
+// chain is used as the base so plugins added by an upgrade still show up.
+void LoadEditorFromScheme(AppState& s, const std::wstring& id) {
     EnsureCatalog(s);
     s.plugins_loaded = false;
     s.edit_plugins.clear();
@@ -1914,100 +1908,69 @@ void LoadPluginsEditor(AppState& s) {
     s.plugin_dirty = false;
     s.plugin_status.clear();
     s.plugin_status_ok = true;
+    s.plugin_chain = ToUtf8(id);
+    s.plugin_choice = ToUtf8(id);
+    s.plugin_custom = HasSchemeOverlay(id);
 
-    const std::string stem = ToUtf8(ChainName(s.settings.chain));
-    const bool custom = stem == "custom";
     ChainDoc doc;
-    if (!ReadStemDoc(stem, &doc)) {
-        s.plugin_chain = stem;
-        s.plugin_choice = custom ? "default" : stem;
+    if (!ReadSchemeChain(id, &doc)) {
         s.plugins_loaded = true;
-        s.plugin_status = L"无法读取方案文件，插件列表不可用。";
+        s.plugin_status =
+            L"无法读取方案包「" + SchemeName(s, id) + L"」，插件列表不可用。";
         s.plugin_status_ok = false;
         return;
     }
 
-    std::string base = stem;
-    if (custom) {
-        base = doc.base.empty() ? "default" : doc.base;
-        ChainDoc base_doc;
-        if (ReadStemDoc(base, &base_doc) && !base_doc.plugins.empty()) {
-            for (const ChainPlugin& plugin : base_doc.plugins) {
-                EditPlugin entry;
-                entry.plugin = plugin;
-                for (const ChainPlugin& override : doc.plugins) {
-                    if (override.id == plugin.id) {
-                        entry.plugin.settings = override.settings;
-                        break;
-                    }
+    ChainDoc base_doc;
+    const bool merge = s.plugin_custom &&
+                       ReadSchemeBaseChain(id, &base_doc) &&
+                       !base_doc.plugins.empty();
+    const std::vector<ChainPlugin>& source = merge ? base_doc.plugins
+                                                   : doc.plugins;
+    for (const ChainPlugin& plugin : source) {
+        EditPlugin entry;
+        entry.plugin = plugin;
+        if (merge) {
+            for (const ChainPlugin& override : doc.plugins) {
+                if (override.id == plugin.id) {
+                    entry.plugin.settings = override.settings;
+                    break;
                 }
-                entry.enabled =
-                    std::find(doc.disabled.begin(), doc.disabled.end(),
-                              plugin.id) == doc.disabled.end();
-                s.edit_plugins.push_back(std::move(entry));
             }
-        } else {
-            for (const ChainPlugin& plugin : doc.plugins) {
-                EditPlugin entry;
-                entry.plugin = plugin;
-                s.edit_plugins.push_back(std::move(entry));
-            }
+            entry.enabled =
+                std::find(doc.disabled.begin(), doc.disabled.end(), plugin.id) ==
+                doc.disabled.end();
         }
-    } else {
-        for (const ChainPlugin& plugin : doc.plugins) {
-            EditPlugin entry;
-            entry.plugin = plugin;
-            s.edit_plugins.push_back(std::move(entry));
-        }
+        s.edit_plugins.push_back(std::move(entry));
     }
-
-    s.plugin_chain = stem;
-    s.plugin_choice = base;
     AttachMeta(s);
     MarkStructural(s);
     s.plugins_loaded = true;
 }
 
+void LoadPluginsEditor(AppState& s) {
+    LoadEditorFromScheme(s, ChainName(s.settings.chain));
+}
+
 void SelectPreset(AppState& s, HWND window, int index) {
     const std::vector<std::wstring> presets = PresetList(s);
     if (index < 0 || index >= static_cast<int>(presets.size())) return;
-    const std::string stem = ToUtf8(presets[index]);
-    ChainDoc doc;
-    if (!ReadStemDoc(stem, &doc)) {
-        s.plugin_status = L"无法读取「" + ChainLabel(presets[index]) + L"」";
-        s.plugin_status_ok = false;
-        Invalidate(s, window);
-        return;
+    const std::wstring id = presets[index];
+    s.settings.chain = id + L".cbor";
+    LoadEditorFromScheme(s, id);
+    if (s.plugin_status_ok) {
+        s.plugin_status = L"已选择「" + SchemeName(s, id) + L"」，保存后生效";
     }
-    EnsureCatalog(s);
-    s.edit_plugins.clear();
-    for (const ChainPlugin& plugin : doc.plugins) {
-        EditPlugin entry;
-        entry.plugin = plugin;
-        s.edit_plugins.push_back(std::move(entry));
-    }
-    s.plugin_chain = stem;
-    s.plugin_choice = stem;
-    s.plugin_dirty = false;
-    s.plugin_selected = -1;
-    s.plugin_scroll = 0;
-    AttachMeta(s);
-    MarkStructural(s);
-    s.plugin_status = L"已选择「" + ChainLabel(presets[index]) +
-                      L"」，保存后生效";
-    s.plugin_status_ok = true;
     Invalidate(s, window);
 }
 
 void RestorePreset(AppState& s, HWND window) {
-    const std::vector<std::wstring> presets = PresetList(s);
-    int index = -1;
-    for (int i = 0; i < static_cast<int>(presets.size()); ++i) {
-        if (ToUtf8(presets[i]) == s.plugin_choice) index = i;
-    }
-    if (index < 0 && !presets.empty()) index = 0;
-    SelectPreset(s, window, index);
-    s.plugin_status = L"已还原为预设默认";
+    const std::wstring id = s.plugin_chain.empty()
+                                ? ChainName(s.settings.chain)
+                                : ToWide(s.plugin_chain);
+    DeleteFileW(SchemeOverlayPath(id).c_str());
+    LoadEditorFromScheme(s, id);
+    s.plugin_status = L"已还原为方案包默认";
     s.plugin_status_ok = true;
     Invalidate(s, window);
 }
@@ -2112,9 +2075,12 @@ void ApplySettings(AppState& s, HWND window) {
     Settings out = s.settings;
 
     if (s.plugins_loaded) {
+        const std::wstring id = s.plugin_chain.empty()
+                                    ? ChainName(s.settings.chain)
+                                    : ToWide(s.plugin_chain);
         if (s.plugin_dirty) {
             ChainDoc doc;
-            doc.base = s.plugin_choice;
+            doc.base = ToUtf8(id);
             for (const EditPlugin& entry : s.edit_plugins) {
                 if (entry.enabled) {
                     doc.plugins.push_back(entry.plugin);
@@ -2122,25 +2088,20 @@ void ApplySettings(AppState& s, HWND window) {
                     doc.disabled.push_back(entry.plugin.id);
                 }
             }
-            const std::wstring dir = PathJoin(DataDirectory(), L"chains");
+            const std::wstring dir =
+                PathJoin(PathJoin(DataDirectory(), L"schemes"), id);
             std::string error;
             if (!EnsureDirectory(dir) ||
                 !WriteChainFile(PathJoin(dir, L"custom.cbor"), doc, &error)) {
-                s.status = L"保存自定义方案失败：" + ToWide(error);
+                s.status = L"保存方案包失败：" + ToWide(error);
                 s.status_ok = false;
                 Invalidate(s, window);
                 return;
             }
-            out.chain = L"custom.cbor";
-            s.plugin_chain = "custom";
+            s.plugin_custom = true;
             s.plugin_dirty = false;
-            if (std::find(s.chains.begin(), s.chains.end(), L"custom") ==
-                s.chains.end()) {
-                s.chains.push_back(L"custom");
-            }
-        } else if (!s.plugin_chain.empty()) {
-            out.chain = ToWide(s.plugin_chain) + L".cbor";
         }
+        out.chain = id + L".cbor";
     }
 
     SaveSettings(out);
@@ -2491,8 +2452,63 @@ void ExportDict(AppState& s, HWND window) {
     Invalidate(s, window);
 }
 
+// Copies a scheme package the user picked into %LOCALAPPDATA%\PIME\schemes.
+// The package directory must contain scheme.yaml; its own chain and plugins
+// come along, so the import is one directory copy.
+void ImportScheme(AppState& s, HWND window) {
+    BROWSEINFOW browse{};
+    browse.hwndOwner = window;
+    browse.lpszTitle = L"选择方案包目录（含 scheme.yaml）";
+    browse.ulFlags = BIF_RETURNONLYFSDIRS | BIF_NEWDIALOGSTYLE;
+    PIDLIST_ABSOLUTE item = SHBrowseForFolderW(&browse);
+    if (!item) return;
+    wchar_t path[MAX_PATH] = {};
+    const bool picked = SHGetPathFromIDListW(item, path) != FALSE;
+    CoTaskMemFree(item);
+    if (!picked) return;
+
+    SchemeInfo info;
+    std::string error;
+    if (!ReadSchemeFile(PathJoin(path, L"scheme.yaml"), &info, &error)) {
+        s.plugin_status = L"导入失败：目录里没有有效的 scheme.yaml";
+        s.plugin_status_ok = false;
+        Invalidate(s, window);
+        return;
+    }
+
+    const std::wstring id = ToWide(info.id);
+    const std::wstring target =
+        PathJoin(PathJoin(DataDirectory(), L"schemes"), id);
+    if (DirectoryExists(target)) {
+        const std::wstring question =
+            L"方案包「" + SchemeName(s, id) + L"」已存在，覆盖？";
+        if (MessageBoxW(window, question.c_str(), L"导入方案包",
+                        MB_ICONQUESTION | MB_YESNO) != IDYES) {
+            return;
+        }
+        DeleteDirectory(target);
+    }
+    if (!EnsureDirectory(target) || !CopyDirectory(path, target)) {
+        s.plugin_status = L"导入失败：无法复制方案包";
+        s.plugin_status_ok = false;
+        Invalidate(s, window);
+        return;
+    }
+
+    s.schemes = ListSchemes();
+    s.settings.chain = id + L".cbor";
+    s.plugin_dirty = false;
+    LoadEditorFromScheme(s, id);
+    s.plugin_status = L"已导入方案包「" + SchemeName(s, id) + L"」，保存后生效";
+    s.plugin_status_ok = true;
+    Invalidate(s, window);
+}
+
 void ActivateById(AppState& s, HWND window, int id) {
     switch (id) {
+        case kImportScheme:
+            ImportScheme(s, window);
+            return;
         case kNavGeneral:
         case kNavAppearance:
         case kNavPlugins:
@@ -2639,8 +2655,9 @@ void Click(AppState& s, HWND window, float x, float y) {
         const int hit = HitTest(s, x, y);
         if (hit >= kMenuItem) {
             const int index = hit - kMenuItem;
-            if (s.menu == Menu::Chain && index < static_cast<int>(s.chains.size())) {
-                s.settings.chain = s.chains[index] + L".cbor";
+            if (s.menu == Menu::Chain &&
+                index < static_cast<int>(s.schemes.size())) {
+                s.settings.chain = ToWide(s.schemes[index].id) + L".cbor";
                 // The plugin editor holds a snapshot of the old chain; force a
                 // reload so Apply cannot write it back over this choice.
                 s.plugins_loaded = false;
@@ -2734,9 +2751,10 @@ std::vector<int> FocusOrder(const AppState& s) {
         for (int i = 0; i < s.layout.preset_count; ++i) {
             order.push_back(kPreset + i);
         }
-        if (s.plugin_dirty || s.plugin_chain == "custom") {
+        if (s.plugin_dirty || s.plugin_custom) {
             order.push_back(kRestore);
         }
+        order.push_back(kImportScheme);
         for (const PlugRow& row : s.layout.plug_rows) {
             order.push_back(kPlugCard + row.plugin);
             if (!s.edit_plugins[row.plugin].structural) {
@@ -2811,14 +2829,15 @@ LRESULT CALLBACK WndProc(HWND window, UINT message, WPARAM wparam,
             self->system_dark = !SystemUsesLightTheme();
             self->installed = IsInstalled();
             self->settings = LoadSettings();
-            self->saved = self->settings;
-            self->chains = ListChains();
-            const std::wstring current = ChainName(self->settings.chain);
-            bool found = false;
-            for (const auto& name : self->chains) {
-                if (name == current) found = true;
+            self->schemes = ListSchemes();
+            // A saved optional scheme may no longer be installed; fall back to
+            // the first installed package (pinyin) instead of showing nothing.
+            if (!FindScheme(*self, ChainName(self->settings.chain)) &&
+                !self->schemes.empty()) {
+                self->settings.chain =
+                    ToWide(self->schemes.front().id) + L".cbor";
             }
-            if (!found) self->chains.push_back(current);
+            self->saved = self->settings;
             self->toggle.value = self->settings.chinese ? 1.f : 0.f;
 
             D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED,

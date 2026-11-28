@@ -92,7 +92,7 @@ uint32_t ScalarValue(const std::string& utf8) {
 struct Options {
     std::wstring resources;
     std::wstring data;
-    std::string chain = "default.cbor";
+    std::string chain = "pinyin.cbor";
     std::string keys;
     bool commit = false;
     bool dict = false;

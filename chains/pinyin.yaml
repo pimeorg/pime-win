@@ -4,7 +4,7 @@
 #
 # Compile:
 #   python ../pime-public-plugin/tools/chainc chains/pinyin.yaml \
-#          -o assets/chains/default.cbor
+#          -o assets/chains/pinyin.cbor
 api: 1
 id: pinyin-desktop
 description: 全拼默认（桌面）

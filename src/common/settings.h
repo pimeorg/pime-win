@@ -5,7 +5,8 @@
 namespace pimewin {
 
 struct Settings {
-    std::wstring chain = L"default.cbor";
+    // Active scheme id with the ".cbor" suffix, e.g. "pinyin.cbor".
+    std::wstring chain = L"pinyin.cbor";
     // 0 = follow system, 1 = light, 2 = dark.
     uint32_t theme = 0;
     uint32_t page_size = 6;

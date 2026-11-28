@@ -4,19 +4,21 @@ Windows 平台的拼音输入法：输入法内核直接复用 `pime-core`（WAM
 界面部分不引入任何 UI 框架，全部用原生 Win32 + Direct2D 绘制。
 
 - TSF 文本服务（`ITfTextInputProcessorEx`）：应用内直接合成、提交、翻页、选词。
-- 输入方案：全拼、双拼（小鹤 / 自然码 / 微软 / 搜狗）、五笔 86、仓颉，
-  以及中文混输英文的「英文补全」；方案来自 `chains/*.yaml`，由插件链
-  （`keymap` / `parse` / `translate` / `rank` / `format`）拼装。
+- 输入方案以「方案包」分发：一个目录里带 `scheme.yaml`、链文件和它引用的
+  插件副本。Windows 默认只装「拼音」和「英文」两个包；双拼（小鹤 / 自然码 /
+  微软 / 搜狗）、五笔 86、仓颉作为可选包留在仓库里，按需构建后导入。方案
+  由插件链（`keymap` / `parse` / `translate` / `rank` / `format`）拼装。
 - 候选条 / 模式气泡：单窗口分层窗口（`WS_EX_LAYERED` + `UpdateLayeredWindow`），
   Direct2D + DirectWrite 绘制，支持高 DPI、浅色/深色、悬停、鼠标点选；
   候选条可横排或竖排，字号分小 / 中 / 大三档。
 - Shift 轻按切换中英文并弹出 `中` / `英` 气泡；PageUp/PageDown、上下键、
   `-` / `=`（含数字键盘）翻页；左右键在候选条上移动选中项（高亮显示），
   空格上屏选中项；数字键、鼠标也可选词。
-- 设置窗口：左侧「常规 / 外观 / 关于」导航，可调输入方案、每页候选数、标点
-  风格、候选排列与字号、启动时默认中文和主题。界面同样不依赖 UI 框架，用
-  Direct2D + DirectWrite 自绘（卡片、分段控件、下拉菜单、开关、主题预览），
-  支持键盘 Tab / Enter / Esc 操作。
+- 设置窗口：左侧「常规 / 外观 / 方案包 / 词库 / 关于」导航，可调输入方案、
+  每页候选数、标点风格、候选排列与字号、启动时默认中文和主题；「方案包」页
+  可切换方案、逐个开关插件、微调参数、导入外部方案包，或「还原」掉自己的
+  改动。界面同样不依赖 UI 框架，用 Direct2D + DirectWrite 自绘（卡片、分段
+  控件、下拉菜单、开关、主题预览），支持键盘 Tab / Enter / Esc 操作。
 - 中英文状态按应用分别记忆（`HKCU\Software\PIME\AppMode`），新应用默认使用
   设置里的「启动时默认中文」。
 - 任务栏输入指示器显示当前状态的 `中` / `英` 图标（蓝色 / 灰色）；点击图标、
@@ -38,8 +40,15 @@ src/common     日志、设置（注册表）、Win32 工具
 src/app        设置窗口与统一入口（--install/--demo/--keys）
 src/demo       RichEdit 测试宿主（pime.exe --demo）
 src/cli        内核探针（pime.exe --keys）
-assets/chains  输入方案；assets/plugins 插件包
+schemes        方案包清单（pinyin/english 默认；optional/ 下的可选包）
+chains         链的源文件，由 chainc 编译进 assets/chains
+assets/chains  编译好的链；assets/plugins 插件包（构建输入）
+cmake          构建期组装方案包的脚本（StageSchemes / StageBinary）
 ```
+
+方案包在构建时组装：`schemes/<id>.yaml`（或 `schemes/optional/<id>.yaml`）
+声明链和插件版本，`StageSchemes.cmake` 从 `assets/` 把链和每个插件的副本
+拷进 `build/dist/schemes/<id>/`，因此每个包运行时自包含。
 
 ## 构建
 
@@ -58,8 +67,18 @@ cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
 cmake --build build
 ```
 
-产物全部落在 `build\dist`：一个前端可执行文件 `pime.exe`、文本服务
-`pime_tsf.dll`，以及 `chains/`、`plugins/`。
+产物全部落在 `build\dist`：前端可执行文件 `pime.exe`、文本服务
+`pime_tsf.dll`、内核 `pime_engine.exe`，以及 `schemes/`（默认只有
+`pinyin` 和 `english` 两个方案包）。
+
+可选方案包单独构建，产物在 `build\optional\schemes\`：
+
+```bat
+cmake --build build --target pime_optional_schemes
+```
+
+把其中某个目录整个拷到 `%LOCALAPPDATA%\PIME\schemes\`，或在设置窗口
+「方案包」页点「导入…」选择该目录，即可在方案列表里看到它。
 
 ```bat
 build\dist\pime.exe            :: 设置窗口
@@ -94,8 +113,10 @@ build\dist\pime.exe --uninstall
 ## 实现说明
 
 - 内核静态链接进 `pime_tsf.dll`：TSF DLL 会被加载进任意宿主进程，不能依赖
-  相对路径查找 `pime_core.dll`；插件链与插件包从 DLL 所在目录的
-  `chains/`、`plugins/` 读取。
+  相对路径查找 `pime_core.dll`；方案包从 DLL 所在目录的 `schemes/` 读取。
+  注册表里的 `Chain` 保存方案 id（如 `pinyin.cbor`），引擎再按 id 找到包内
+  的链和插件目录；用户对方案的改动写在
+  `%LOCALAPPDATA%\PIME\schemes\<id>\custom.cbor`，优先于包内原链。
 - 只有一个前端 exe：设置窗口、安装器、`--demo` 测试编辑器和 `--keys` 内核
   探针都从 `pime.exe` 进入；安装/卸载按钮用 `runas` 重新启动自身。
 - 候选窗口不接收激活（`WS_EX_NOACTIVATE`），鼠标命中检测在分层位图上完成；
@@ -130,6 +151,7 @@ build\dist\pime.exe --uninstall
   确保输入法列表立即出现。
 - `assets/plugins/pime-plugin-pime-speech-sherpa-1.0.0` 只带 manifest、没有
   平台二进制，加载器会跳过它（日志中一条 `CORRUPT` 警告）；拼音输入不受影响。
+  它没有进入任何默认或可选方案包。
 
 ## 已知限制
 

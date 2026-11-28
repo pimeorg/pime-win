@@ -15,7 +15,7 @@ constexpr wchar_t kAppMode[] = L"Software\\PIME\\AppMode";
 Settings LoadSettings() {
     Settings settings;
     settings.chain = RegistryGetString(HKEY_CURRENT_USER, kRoot, L"Chain",
-                                       L"default.cbor");
+                                       L"pinyin.cbor");
     settings.theme = RegistryGetDword(HKEY_CURRENT_USER, kRoot, L"Theme", 0);
     settings.page_size =
         RegistryGetDword(HKEY_CURRENT_USER, kRoot, L"PageSize", 6);
@@ -27,9 +27,26 @@ Settings LoadSettings() {
     settings.candidate_font =
         RegistryGetDword(HKEY_CURRENT_USER, kRoot, L"CandidateFont", 15);
 
+    // Migrate the pre-scheme layout: the pinyin chain used to be default.cbor,
+    // and an edited chain lived in chains/custom.cbor. The latter becomes the
+    // pinyin scheme's user edit so upgrades keep the user's pipeline.
+    if (settings.chain == L"default.cbor") settings.chain = L"pinyin.cbor";
+    if (settings.chain == L"custom.cbor") {
+        const std::wstring legacy =
+            PathJoin(PathJoin(DataDirectory(), L"chains"), L"custom.cbor");
+        const std::wstring dir =
+            PathJoin(PathJoin(DataDirectory(), L"schemes"), L"pinyin");
+        const std::wstring overlay = PathJoin(dir, L"custom.cbor");
+        std::vector<uint8_t> bytes;
+        if (FileExists(legacy) && !FileExists(overlay) &&
+            ReadFileBytes(legacy, &bytes) && EnsureDirectory(dir)) {
+            WriteFileBytes(overlay, bytes);
+        }
+        settings.chain = L"pinyin.cbor";
+    }
     if (settings.chain.empty() || settings.chain.find(L"..") != std::wstring::npos ||
         settings.chain.find_first_of(L"\\/:") != std::wstring::npos) {
-        settings.chain = L"default.cbor";
+        settings.chain = L"pinyin.cbor";
     }
     if (settings.theme > 2) settings.theme = 0;
     if (settings.page_size < 3) settings.page_size = 3;

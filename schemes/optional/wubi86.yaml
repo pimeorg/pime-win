@@ -1,0 +1,13 @@
+# 五笔 86 方案包（可选，不进入 Windows 默认分发）
+api: 1
+id: wubi86
+name: 五笔 86
+description: 五笔 86（桌面）
+version: 1.0.0
+chain: wubi86.cbor
+plugins:
+  - { id: pime-keymap-default, version: 1.3.0 }
+  - { id: pime-wubi-parse, version: 1.1.1 }
+  - { id: pime-wubi-translate, version: 1.1.0 }
+  - { id: pime-rank-default, version: 1.0.0 }
+  - { id: pime-candidates-format, version: 1.5.1 }

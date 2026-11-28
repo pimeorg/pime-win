@@ -87,6 +87,52 @@ bool EnsureDirectory(const std::wstring& path) {
     return result == ERROR_SUCCESS || result == ERROR_ALREADY_EXISTS;
 }
 
+bool CopyDirectory(const std::wstring& source, const std::wstring& target) {
+    if (!EnsureDirectory(target)) return false;
+    WIN32_FIND_DATAW data{};
+    HANDLE find =
+        FindFirstFileW(PathJoin(source, L"*").c_str(), &data);
+    if (find == INVALID_HANDLE_VALUE) return false;
+    bool ok = true;
+    do {
+        if (wcscmp(data.cFileName, L".") == 0 ||
+            wcscmp(data.cFileName, L"..") == 0) {
+            continue;
+        }
+        const std::wstring from = PathJoin(source, data.cFileName);
+        const std::wstring to = PathJoin(target, data.cFileName);
+        if ((data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0) {
+            if (!CopyDirectory(from, to)) ok = false;
+        } else if (!CopyFileW(from.c_str(), to.c_str(), FALSE)) {
+            ok = false;
+        }
+    } while (FindNextFileW(find, &data));
+    FindClose(find);
+    return ok;
+}
+
+bool DeleteDirectory(const std::wstring& path) {
+    WIN32_FIND_DATAW data{};
+    HANDLE find = FindFirstFileW(PathJoin(path, L"*").c_str(), &data);
+    if (find != INVALID_HANDLE_VALUE) {
+        do {
+            if (wcscmp(data.cFileName, L".") == 0 ||
+                wcscmp(data.cFileName, L"..") == 0) {
+                continue;
+            }
+            const std::wstring child = PathJoin(path, data.cFileName);
+            if ((data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0) {
+                DeleteDirectory(child);
+            } else {
+                SetFileAttributesW(child.c_str(), FILE_ATTRIBUTE_NORMAL);
+                DeleteFileW(child.c_str());
+            }
+        } while (FindNextFileW(find, &data));
+        FindClose(find);
+    }
+    return RemoveDirectoryW(path.c_str()) != 0;
+}
+
 bool ReadFileBytes(const std::wstring& path, std::vector<uint8_t>* out) {
     HANDLE file = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ,
                               nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL,
