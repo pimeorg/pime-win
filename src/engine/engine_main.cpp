@@ -77,9 +77,13 @@ uint32_t PageAfter(uint32_t page, uint32_t vkey) {
     switch (vkey) {
         case VK_PRIOR:
         case VK_UP:
+        case VK_OEM_MINUS:
+        case VK_SUBTRACT:
             return page > 0 ? page - 1 : 0;
         case VK_NEXT:
         case VK_DOWN:
+        case VK_OEM_PLUS:
+        case VK_ADD:
             return page + 1;
         default:
             return 0;

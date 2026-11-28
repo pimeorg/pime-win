@@ -1,6 +1,6 @@
 description: 拼音候选重排：短词加权后按分数降序
 id: pime-pinyin-rank
-version: 1.4.0
+version: 1.4.1
 abi: { major: 1, minor: 0 }
 min_core: "1.0.0"
 state_schema: 2

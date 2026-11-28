@@ -519,7 +519,14 @@ public:
         const bool v_mode =
             !composition_text_.empty() &&
             (composition_text_[0] == L'v' || composition_text_[0] == L'V');
-        if (!punctuation.empty() && !(v_mode && IsVModeOperator(ascii))) {
+        // While a composition is up '-' and '+' page the strip like
+        // PageUp/PageDown (the chain maps them to pageup/pagedown), so they
+        // must reach the engine instead of becoming full-width marks. If the
+        // chain has nothing to page, they fall back to the mark below.
+        const bool paging_mark =
+            !punctuation.empty() && !(v_mode && IsVModeOperator(ascii)) &&
+            (composition_ || candidates_up_) && IsPagingKey(vkey);
+        auto commit_mark = [&]() -> bool {
             if (composition_ || candidates_up_) {
                 KeyEvent space;
                 space.keycode = VK_SPACE;
@@ -538,9 +545,13 @@ public:
                     CommitInContext(ec, punctuation);
                 }));
             }
+            return committed;
+        };
+        if (!punctuation.empty() && !(v_mode && IsVModeOperator(ascii)) &&
+            !paging_mark) {
             // A mark that could not be delivered must not vanish with the key:
             // let it reach the app as typed instead of swallowing it.
-            if (committed) {
+            if (commit_mark()) {
                 *eaten = TRUE;
             } else {
                 DropPreedit();
@@ -566,8 +577,20 @@ public:
         // Only eat the key when its output actually reached the document; a
         // refused edit session must not leave the user with dead keys.
         const bool applied = ApplyCommands(result.commands);
-        if (result.handled && applied) *eaten = TRUE;
-        if (!applied) DropPreedit();
+        if (result.handled && applied) {
+            *eaten = TRUE;
+            return S_OK;
+        }
+        if (!applied) {
+            DropPreedit();
+            return S_OK;
+        }
+        // A paging key the chain could not use (no candidates to page) still
+        // ends the preedit with its mark, as it did before paging existed.
+        if (paging_mark) {
+            if (commit_mark()) *eaten = TRUE;
+            else DropPreedit();
+        }
         return S_OK;
     }
     STDMETHODIMP OnKeyUp(ITfContext*, WPARAM vkey, LPARAM, BOOL* eaten) override {
@@ -712,6 +735,19 @@ private:
                 return true;
             default:
                 return (text[0] >= '0' && text[0] <= '9');
+        }
+    }
+
+    // Keys the chain treats as candidate paging (pageup/pagedown aliases).
+    static bool IsPagingKey(WPARAM vkey) {
+        switch (vkey) {
+            case VK_OEM_MINUS:
+            case VK_OEM_PLUS:
+            case VK_ADD:
+            case VK_SUBTRACT:
+                return true;
+            default:
+                return false;
         }
     }
 

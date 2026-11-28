@@ -55,7 +55,7 @@ LRESULT CALLBACK WndProc(HWND window, UINT message, WPARAM wparam,
             self->edit = CreateWindowExW(
                 0, MSFTEDIT_CLASS,
                 L"在此输入拼音，例如 nihao，然后按空格上屏。\r\n"
-                L"Shift 切换中英文；上下键或 PageUp/PageDown 翻页；数字或鼠标选词。\r\n",
+                L"Shift 切换中英文；上下键、PageUp/PageDown 或 -/= 翻页；数字或鼠标选词。\r\n",
                 WS_CHILD | WS_VISIBLE | WS_VSCROLL | WS_TABSTOP | ES_MULTILINE |
                     ES_AUTOVSCROLL | ES_WANTRETURN | ES_NOHIDESEL,
                 0, 0, 0, 0, window, nullptr, GetModuleHandleW(nullptr),

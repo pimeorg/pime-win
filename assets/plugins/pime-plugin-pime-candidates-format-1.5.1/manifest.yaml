@@ -1,6 +1,6 @@
 description: 候选与组合收尾：展示候选、空格/数字选词、Esc 取消
 id: pime-candidates-format
-version: 1.5.0
+version: 1.5.1
 abi: { major: 1, minor: 0 }
 min_core: "1.0.0"
 state_schema: 2
