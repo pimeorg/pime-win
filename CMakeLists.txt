@@ -141,30 +141,47 @@ set_target_properties(pime PROPERTIES OUTPUT_NAME "pime")
 # ---------------------------------------------------------------------------
 # Staging: dist/{pime.exe,pime_tsf.dll,pime_engine.exe} + dist/schemes/*
 #
-# Windows ships only the pinyin and english scheme packages. Each package is
-# self-contained (chain + the plugin copies it needs), so the default install
-# does not need the shared assets/plugins or assets/chains directories.
+# Scheme packages are assembled by pime-public-plugin (tools/pack_schemes.py):
+# a chain plus copies of the plugins it pins. Windows ships only the pinyin
+# and english packages; other packages stay in the plugin repo and can be
+# imported from the settings window.
 # ---------------------------------------------------------------------------
+set(PIME_PLUGIN_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../pime-public-plugin"
+    CACHE PATH "pime-public-plugin checkout with assembled scheme packages")
+set(PIME_SCHEME_DIST "${PIME_PLUGIN_DIR}/dist/schemes")
 set(PIME_DEFAULT_SCHEMES pinyin english)
-set(PIME_OPTIONAL_SCHEMES
-    shuangpin-xiaohe shuangpin-ziranma shuangpin-microsoft shuangpin-sogou
-    wubi86 cangjie)
+
+foreach(scheme IN LISTS PIME_DEFAULT_SCHEMES)
+    if(NOT EXISTS "${PIME_SCHEME_DIST}/${scheme}/scheme.yaml")
+        message(FATAL_ERROR
+            "Scheme package '${scheme}' is not assembled under ${PIME_SCHEME_DIST}.\n"
+            "Build it in ${PIME_PLUGIN_DIR} first:\n"
+            "  cmake -S . -B build/wasm-ndk -G Ninja -DCMAKE_BUILD_TYPE=Release"
+            " -DCMAKE_TOOLCHAIN_FILE=cmake/toolchains/wasm32-ndk.cmake\n"
+            "  cmake --build build/wasm-ndk --target pime_schemes")
+    endif()
+endforeach()
+
+set(PIME_STAGE_SCHEMES)
+foreach(scheme IN LISTS PIME_DEFAULT_SCHEMES)
+    list(APPEND PIME_STAGE_SCHEMES
+        COMMAND "${CMAKE_COMMAND}" -E copy_directory
+                "${PIME_SCHEME_DIST}/${scheme}"
+                "${PIME_DIST_DIR}/schemes/${scheme}")
+endforeach()
 
 add_custom_target(pime_dist ALL
     COMMAND "${CMAKE_COMMAND}" -E make_directory "${PIME_DIST_DIR}"
-    # The shared plugins/ and chains/ directories are gone; remove copies left
-    # by an older build so the default install really only has two schemes.
+    # Scheme packages are build inputs now: drop the whole directory so a
+    # plugin removed from a package does not linger from an earlier build.
     COMMAND "${CMAKE_COMMAND}" -E rm -rf
             "${PIME_DIST_DIR}/plugins" "${PIME_DIST_DIR}/chains"
+            "${PIME_DIST_DIR}/schemes"
     COMMAND "${CMAKE_COMMAND}" -E copy_if_different
             "${CMAKE_CURRENT_SOURCE_DIR}/assets/mode_en.ico"
             "${CMAKE_CURRENT_SOURCE_DIR}/assets/mode_zh.ico"
             "${PIME_DIST_DIR}"
-    COMMAND "${CMAKE_COMMAND}"
-            "-DSOURCE_DIR=${CMAKE_CURRENT_SOURCE_DIR}"
-            "-DDIST_DIR=${PIME_DIST_DIR}"
-            "-DSCHEMES=${PIME_DEFAULT_SCHEMES}"
-            -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/StageSchemes.cmake"
+    ${PIME_STAGE_SCHEMES}
     COMMAND "${CMAKE_COMMAND}"
             "-DSOURCE=$<TARGET_FILE:pime_tsf>"
             "-DDEST_DIR=${PIME_DIST_DIR}"
@@ -179,18 +196,6 @@ add_custom_target(pime_dist ALL
             -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/StageBinary.cmake"
     DEPENDS pime_tsf pime pime_engine
     COMMENT "Staging PIME into ${PIME_DIST_DIR}"
-)
-
-# Optional schemes stay in the repo but are not part of the default install.
-# Users copy a package into %LOCALAPPDATA%\PIME\schemes or import it from the
-# settings window.
-add_custom_target(pime_optional_schemes
-    COMMAND "${CMAKE_COMMAND}"
-            "-DSOURCE_DIR=${CMAKE_CURRENT_SOURCE_DIR}"
-            "-DDIST_DIR=${CMAKE_BINARY_DIR}/optional"
-            "-DSCHEMES=${PIME_OPTIONAL_SCHEMES}"
-            -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/StageSchemes.cmake"
-    COMMENT "Staging optional scheme packages into ${CMAKE_BINARY_DIR}/optional"
 )
 
 add_custom_target(pime_run

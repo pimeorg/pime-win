@@ -40,20 +40,31 @@ src/common     日志、设置（注册表）、Win32 工具
 src/app        设置窗口与统一入口（--install/--demo/--keys）
 src/demo       RichEdit 测试宿主（pime.exe --demo）
 src/cli        内核探针（pime.exe --keys）
-schemes        方案包清单（pinyin/english 默认；optional/ 下的可选包）
-chains         链的源文件，由 chainc 编译进 assets/chains
-assets/chains  编译好的链；assets/plugins 插件包（构建输入）
-cmake          构建期组装方案包的脚本（StageSchemes / StageBinary）
+assets         模式图标
+cmake          构建期拷贝二进制（StageBinary）
 ```
 
-方案包在构建时组装：`schemes/<id>.yaml`（或 `schemes/optional/<id>.yaml`）
-声明链和插件版本，`StageSchemes.cmake` 从 `assets/` 把链和每个插件的副本
-拷进 `build/dist/schemes/<id>/`，因此每个包运行时自包含。
+方案包不由本仓库组织：链配方、插件清单和组装都在
+`../pime-public-plugin`（`schemes/win/<id>/` + `tools/pack_schemes.py`）。
+本仓库构建时只从它的 `dist/schemes/` 取默认的 `pinyin`、`english` 两个包，
+拷进 `build/dist/schemes/`。
 
 ## 构建
 
 依赖：Visual Studio 2022（MSVC x64）、CMake ≥ 3.25、Ninja；
-以及同级检出的 `../pime-core` 与 `../pime-android`（提供 WAMR）。
+同级检出的 `../pime-core`、`../pime-android`（提供 WAMR）和
+`../pime-public-plugin`（提供方案包）。
+
+先组装方案包（在 plugin 仓库里，需要 Python 3 + PyYAML）：
+
+```bat
+cd ..\pime-public-plugin
+cmake -S . -B build\wasm-ndk -G Ninja -DCMAKE_BUILD_TYPE=Release ^
+      -DCMAKE_TOOLCHAIN_FILE=cmake/toolchains/wasm32-ndk.cmake
+cmake --build build\wasm-ndk --target pime_schemes
+```
+
+再构建本仓库：
 
 ```bat
 build.bat
@@ -68,17 +79,14 @@ cmake --build build
 ```
 
 产物全部落在 `build\dist`：前端可执行文件 `pime.exe`、文本服务
-`pime_tsf.dll`、内核 `pime_engine.exe`，以及 `schemes/`（默认只有
-`pinyin` 和 `english` 两个方案包）。
+`pime_tsf.dll`、内核 `pime_engine.exe`，以及从 plugin 仓库拷来的
+`schemes/`（默认只有 `pinyin` 和 `english` 两个方案包）。plugin 仓库路径
+可用 `-DPIME_PLUGIN_DIR=...` 覆盖；找不到方案包时配置阶段会报错并给出上面
+的命令。
 
-可选方案包单独构建，产物在 `build\optional\schemes\`：
-
-```bat
-cmake --build build --target pime_optional_schemes
-```
-
-把其中某个目录整个拷到 `%LOCALAPPDATA%\PIME\schemes\`，或在设置窗口
-「方案包」页点「导入…」选择该目录，即可在方案列表里看到它。
+其余方案包（双拼四种、五笔 86、仓颉）在 plugin 仓库的
+`dist\schemes\` 里；把某个目录整个拷到 `%LOCALAPPDATA%\PIME\schemes\`，或
+在设置窗口「方案包」页点「导入…」选择该目录，即可在方案列表里看到它。
 
 ```bat
 build\dist\pime.exe            :: 设置窗口
@@ -149,9 +157,6 @@ build\dist\pime.exe --uninstall
   卸载时以 `ILOT_UNINSTALL` 标志移除。由于该 API 在刚注册配置的同一进程内
   不生效，安装器会在注册完成后启动一次自身的 `--sync-input-list` 子进程，
   确保输入法列表立即出现。
-- `assets/plugins/pime-plugin-pime-speech-sherpa-1.0.0` 只带 manifest、没有
-  平台二进制，加载器会跳过它（日志中一条 `CORRUPT` 警告）；拼音输入不受影响。
-  它没有进入任何默认或可选方案包。
 
 ## 已知限制
 
