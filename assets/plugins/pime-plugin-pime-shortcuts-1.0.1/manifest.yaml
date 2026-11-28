@@ -1,6 +1,6 @@
 description: 快捷短语与 {date} {time} {weekday} 模板展开
 id: pime-shortcuts
-version: 1.0.0
+version: 1.0.1
 abi: { major: 1, minor: 0 }
 min_core: "1.0.0"
 state_schema: 1
