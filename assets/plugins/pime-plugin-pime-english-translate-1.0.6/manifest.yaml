@@ -1,6 +1,6 @@
 description: 英文翻译：原码在前，前缀补全与拼写建议；中文链内追加英文候选
 id: pime-english-translate
-version: 1.0.5
+version: 1.0.6
 abi: { major: 1, minor: 0 }
 min_core: "1.0.0"
 state_schema: 1

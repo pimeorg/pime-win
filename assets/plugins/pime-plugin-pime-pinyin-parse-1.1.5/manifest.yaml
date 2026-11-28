@@ -1,6 +1,6 @@
 description: 全拼解析：音节切分、自动纠错、触点邻键纠正与预编辑
 id: pime-pinyin-parse
-version: 1.1.4
+version: 1.1.5
 abi: { major: 1, minor: 0 }
 min_core: "1.0.0"
 state_schema: 1
