@@ -60,6 +60,7 @@ add_library(pime_host STATIC
     src/common/win_util.cpp
     src/common/log.cpp
     src/common/settings.cpp
+    src/common/chain_file.cpp
     src/common/store_key.cpp
     src/common/user_dict_format.cpp
     src/engine/core_engine.cpp

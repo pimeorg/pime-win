@@ -8,6 +8,7 @@
 #include <wrl/client.h>
 
 #include <algorithm>
+#include <cmath>
 #include <cstdlib>
 #include <iterator>
 #include <string>
@@ -18,6 +19,7 @@
 
 #include "app/resource.h"
 #include "app/rime_dict.h"
+#include "common/chain_file.h"
 #include "common/log.h"
 #include "common/settings.h"
 #include "common/user_dict_format.h"
@@ -44,15 +46,16 @@ constexpr float kMargin = 32.f;
 constexpr float kDictHeader = 36.f;
 constexpr float kDictRowHeight = 40.f;
 
-enum class Page { General, Appearance, Dictionary, About };
+enum class Page { General, Appearance, Plugins, Dictionary, About };
 enum class Menu { None, Chain, PageSize };
 
 enum : int {
     kNone = -1,
     kNavGeneral = 1,
     kNavAppearance = 2,
-    kNavDictionary = 3,
-    kNavAbout = 4,
+    kNavPlugins = 3,
+    kNavDictionary = 4,
+    kNavAbout = 5,
     kChain = 10,
     kPageSize = 11,
     kPunctFull = 20,
@@ -78,8 +81,13 @@ enum : int {
     kDictExport = 64,
     kDictClear = 65,
     kDictRefresh = 66,
+    kPreset = 70,      // kPreset + preset index
+    kRestore = 79,
     kMenuItem = 100,
     kDictRow = 200,
+    kPlugCard = 3000,   // kPlugCard + plugin index
+    kPlugToggle = 3500, // kPlugToggle + plugin index
+    kPlugSetting = 4000,  // kPlugSetting + plugin * 32 + spec index
 };
 
 struct Box {
@@ -91,8 +99,26 @@ struct Box {
     float H() const { return b - t; }
 };
 
+// A control inside an expanded plugin card. `spec` indexes the manifest's
+// settings list, so the value is always interpreted with its declared type.
+struct PlugControl {
+    enum class Kind { Bool, Int, Enum };
+    Box box;
+    int spec = 0;
+    Kind kind = Kind::Bool;
+    int segments = 0;
+};
+
+struct PlugRow {
+    int plugin = 0;
+    Box card;
+    Box toggle;
+    bool expanded = false;
+    std::vector<PlugControl> controls;
+};
+
 struct Layout {
-    Box nav[4];
+    Box nav[5];
     Box chain;
     Box page_size;
     Box punct[2];
@@ -107,6 +133,12 @@ struct Layout {
     Box activate;
     Box dict_tool[7];
     Box dict_list;
+    Box preset[8];
+    int preset_count = 0;
+    Box restore;
+    Box plug_view;
+    std::vector<PlugRow> plug_rows;
+    float plug_content = 0;
     Box menu;
     int menu_items = 0;
 };
@@ -118,6 +150,15 @@ struct DictRow {
     uint32_t weight = 0;
     std::string code_raw;
     std::string word_raw;
+};
+
+// One plugin in the chain editor. Disabled plugins stay in the list so the
+// user can switch them back on; only enabled ones are written to the chain.
+struct EditPlugin {
+    ChainPlugin plugin;
+    int meta = -1;  // index into AppState::catalog, -1 when unknown
+    bool enabled = true;
+    bool structural = false;  // removing it would break the pipeline
 };
 
 struct Palette {
@@ -177,6 +218,22 @@ struct AppState {
     Settings settings;
     Settings saved;
     std::vector<std::wstring> chains;
+
+    // Plugin-chain editor. `edit_plugins` is the working copy; `plugin_chain`
+    // is the file it currently represents ("default", "custom", ...) and
+    // `plugin_choice` the preset the chips highlight.
+    std::vector<EditPlugin> edit_plugins;
+    std::vector<PluginMeta> catalog;
+    bool catalog_loaded = false;
+    bool plugins_loaded = false;
+    std::string plugin_chain;
+    std::string plugin_choice;
+    bool plugin_dirty = false;
+    int plugin_selected = -1;
+    float plugin_scroll = 0;
+    int plugin_drag = kNone;
+    std::wstring plugin_status;
+    bool plugin_status_ok = true;
 
     std::wstring status;
     bool status_ok = true;
@@ -370,9 +427,9 @@ bool IsInstalled() {
 // anything else (a user-dropped chain) alphabetically at the end.
 int ChainOrder(const std::wstring& name) {
     static const wchar_t* const kOrder[] = {
-        L"default",          L"shuangpin-xiaohe", L"shuangpin-ziranma",
-        L"shuangpin-microsoft", L"shuangpin-sogou", L"wubi86",
-        L"cangjie",          L"english",
+        L"default",          L"custom",          L"shuangpin-xiaohe",
+        L"shuangpin-ziranma", L"shuangpin-microsoft", L"shuangpin-sogou",
+        L"wubi86",           L"cangjie",         L"english",
     };
     for (int i = 0; i < static_cast<int>(std::size(kOrder)); ++i) {
         if (name == kOrder[i]) return i;
@@ -380,20 +437,27 @@ int ChainOrder(const std::wstring& name) {
     return static_cast<int>(std::size(kOrder));
 }
 
-std::vector<std::wstring> ListChains() {
-    std::vector<std::wstring> names;
-    const std::wstring pattern = PathJoin(
-        PathJoin(ModuleDirectory(nullptr), L"chains"), L"*.cbor");
+void AppendChains(const std::wstring& dir, std::vector<std::wstring>* names) {
+    const std::wstring pattern = PathJoin(dir, L"*.cbor");
     WIN32_FIND_DATAW data{};
     HANDLE find = FindFirstFileW(pattern.c_str(), &data);
-    if (find == INVALID_HANDLE_VALUE) return names;
+    if (find == INVALID_HANDLE_VALUE) return;
     do {
         std::wstring name = data.cFileName;
         const size_t dot = name.rfind(L'.');
         if (dot != std::wstring::npos) name.resize(dot);
-        names.push_back(name);
+        if (std::find(names->begin(), names->end(), name) == names->end()) {
+            names->push_back(name);
+        }
     } while (FindNextFileW(find, &data));
     FindClose(find);
+}
+
+// Bundled chains plus the user's adjusted chain in %LOCALAPPDATA%\PIME\chains.
+std::vector<std::wstring> ListChains() {
+    std::vector<std::wstring> names;
+    AppendChains(PathJoin(ModuleDirectory(nullptr), L"chains"), &names);
+    AppendChains(PathJoin(DataDirectory(), L"chains"), &names);
     std::sort(names.begin(), names.end(), [](const std::wstring& a,
                                              const std::wstring& b) {
         const int oa = ChainOrder(a);
@@ -416,6 +480,7 @@ std::wstring ChainName(const std::wstring& file) {
 std::wstring ChainLabel(const std::wstring& file) {
     const std::wstring name = ChainName(file);
     if (name == L"default") return L"全拼";
+    if (name == L"custom") return L"自定义";
     if (name == L"shuangpin-xiaohe") return L"双拼 · 小鹤";
     if (name == L"shuangpin-ziranma") return L"双拼 · 自然码";
     if (name == L"shuangpin-microsoft") return L"双拼 · 微软";
@@ -424,6 +489,186 @@ std::wstring ChainLabel(const std::wstring& file) {
     if (name == L"cangjie") return L"仓颉";
     if (name == L"english") return L"英文补全";
     return name;
+}
+
+// Human labels for the pipeline roles, in the order a chain runs them.
+const wchar_t* RoleLabel(const std::string& role) {
+    if (role == "preprocess") return L"预处理";
+    if (role == "parse") return L"解析";
+    if (role == "translate") return L"翻译";
+    if (role == "rank") return L"排序";
+    if (role == "format") return L"格式化";
+    if (role == "predict") return L"联想";
+    if (role == "learn") return L"学习";
+    if (role == "recognize") return L"识别";
+    if (role == "service") return L"服务";
+    return L"其他";
+}
+
+int RoleOrder(const std::string& role) {
+    static const char* const kRoles[] = {
+        "preprocess", "parse", "translate", "rank",
+        "format",     "predict", "learn",  "recognize",
+        "service",
+    };
+    for (int i = 0; i < static_cast<int>(std::size(kRoles)); ++i) {
+        if (role == kRoles[i]) return i;
+    }
+    return static_cast<int>(std::size(kRoles));
+}
+
+D2D1_COLOR_F RoleColor(const std::string& role) {
+    if (role == "preprocess") return Rgb(96, 125, 139);
+    if (role == "parse") return Rgb(0, 150, 136);
+    if (role == "translate") return Rgb(92, 107, 230);
+    if (role == "rank") return Rgb(230, 145, 20);
+    if (role == "format") return Rgb(60, 165, 95);
+    if (role == "predict") return Rgb(150, 90, 200);
+    if (role == "learn") return Rgb(220, 100, 150);
+    if (role == "recognize") return Rgb(220, 80, 80);
+    return Rgb(130, 136, 148);
+}
+
+// Display names for the bundled plugins. Unknown ids fall back to the id
+// with the "pime-" prefix removed, which still reads fine.
+std::wstring PluginName(const std::string& id) {
+    static const struct {
+        const char* id;
+        const wchar_t* name;
+    } kNames[] = {
+        {"pime-keymap-default", L"默认键位"},
+        {"pime-pinyin-parse", L"拼音解析"},
+        {"pime-shape-parse", L"形码解析"},
+        {"pime-pinyin-translate", L"拼音候选"},
+        {"pime-special-candidates", L"特殊候选"},
+        {"pime-shortcuts", L"快捷短语"},
+        {"pime-hans-hant", L"简繁转换"},
+        {"pime-shape-translate", L"字形候选"},
+        {"pime-english-translate", L"英文候选"},
+        {"pime-emoji-suggest", L"Emoji 联想"},
+        {"pime-clip-code", L"剪贴板编码"},
+        {"pime-candidates-format", L"候选排版"},
+        {"pime-learn-user-dict", L"学习用户词"},
+        {"pime-predict-context", L"上下文联想"},
+        {"pime-app-mode", L"应用模式"},
+        {"pime-dict-packs", L"词库包"},
+        {"pime-personal-merge", L"个人词合并"},
+        {"pime-model-manager", L"模型管理"},
+        {"pime-shuangpin-standard", L"双拼方案"},
+        {"pime-wubi-parse", L"五笔解析"},
+        {"pime-wubi-translate", L"五笔候选"},
+        {"pime-cangjie-parse", L"仓颉解析"},
+        {"pime-cangjie-translate", L"仓颉候选"},
+        {"pime-rank-default", L"默认排序"},
+        {"pime-pinyin-rank", L"拼音排序"},
+        {"pime-english-parse", L"英文解析"},
+        {"pime-speech-sherpa", L"语音识别"},
+    };
+    for (const auto& entry : kNames) {
+        if (id == entry.id) return entry.name;
+    }
+    std::string fallback = id;
+    if (fallback.rfind("pime-", 0) == 0) fallback = fallback.substr(5);
+    return ToWide(fallback);
+}
+
+// The catalog is sorted newest first per id, so the first match wins when the
+// chain does not pin a version.
+// Friendly labels for the setting keys that appear in the bundled chains.
+// Unknown keys fall back to the raw key, which is still readable.
+std::wstring SettingLabel(const std::string& key) {
+    static const struct {
+        const char* key;
+        const wchar_t* label;
+    } kLabels[] = {
+        {"enabled", L"启用"},
+        {"page_size", L"每页候选数"},
+        {"max_candidates", L"候选上限"},
+        {"completion", L"英文补全"},
+        {"completion_limit", L"补全数量"},
+        {"corrections", L"拼写纠正"},
+        {"fuzzy", L"模糊音"},
+        {"max_syllables", L"最大音节"},
+        {"auto_correct", L"自动纠错"},
+        {"tap_correct", L"轻点纠错"},
+        {"english_passthrough", L"英文直通"},
+        {"mixed_uppercase", L"混合大小写"},
+        {"collocation_weight", L"搭配权重"},
+        {"short_boost", L"短词加权"},
+        {"cohesion_boost", L"词组凝聚"},
+        {"learn_boost", L"学习加权"},
+        {"recent_boost", L"最近使用"},
+        {"profile_boost", L"场景加权"},
+        {"user_boost", L"用户词加权"},
+        {"hotword_boost", L"热词加权"},
+        {"decay_days", L"记忆衰减（天）"},
+        {"profile", L"使用场景"},
+        {"space_selects_candidate", L"空格选词"},
+        {"candidate_keys", L"候选快捷键"},
+        {"number_selects_candidate", L"数字选词"},
+        {"remember", L"记住应用状态"},
+        {"observe", L"观察应用"},
+        {"default_mode", L"默认模式"},
+        {"min_len", L"最短长度"},
+        {"max_len", L"最长长度"},
+        {"v_mode", L"v 模式"},
+        {"date", L"日期候选"},
+        {"show_labels", L"显示序号"},
+        {"show_comments", L"显示注释"},
+        {"commit_on_enter", L"回车上屏"},
+        {"commit_raw", L"上屏原码"},
+        {"undo_window_ms", L"撤销窗口（毫秒）"},
+        {"max_recent", L"最近词数量"},
+        {"user_bigram", L"用户二元组"},
+        {"continuation", L"续写联想"},
+        {"collocation", L"搭配联想"},
+        {"fallback", L"兜底联想"},
+        {"show_command", L"命令提示"},
+        {"max_code", L"最长编码"},
+        {"scheme", L"双拼方案"},
+        {"min_score", L"最低分数"},
+        {"comment", L"注释"},
+        {"max_entries", L"词条上限"},
+        {"threads", L"线程数"},
+        {"sample_rate", L"采样率"},
+        {"model", L"模型"},
+        {"endpoint", L"接口地址"},
+        {"api_key", L"API Key"},
+        {"secret_id", L"Secret ID"},
+        {"secret_key", L"Secret Key"},
+        {"app_id", L"App ID"},
+        {"app_key", L"App Key"},
+        {"access_key", L"Access Key"},
+        {"resource_id", L"资源 ID"},
+        {"hotword_list", L"热词表"},
+        {"engine_model_type", L"引擎模型"},
+        {"runtime_dir", L"运行目录"},
+        {"model_dir", L"模型目录"},
+        {"wav_file", L"WAV 文件"},
+        {"custom_model", L"自定义模型"},
+        {"disabled", L"停用列表"},
+    };
+    for (const auto& entry : kLabels) {
+        if (key == entry.key) return entry.label;
+    }
+    return ToWide(key);
+}
+
+const PluginMeta* FindMeta(const AppState& s, const std::string& id,
+                           const std::string& version) {
+    for (const PluginMeta& meta : s.catalog) {
+        if (meta.id != id) continue;
+        if (version.empty() || meta.version == version) return &meta;
+    }
+    return nullptr;
+}
+
+std::vector<std::wstring> PresetList(const AppState& s) {
+    std::vector<std::wstring> presets;
+    for (const std::wstring& name : s.chains) {
+        if (name != L"custom") presets.push_back(name);
+    }
+    return presets;
 }
 
 int ChainIndex(const AppState& s) {
@@ -447,7 +692,9 @@ bool SameSettings(const Settings& a, const Settings& b) {
            a.candidate_font == b.candidate_font;
 }
 
-bool Dirty(const AppState& s) { return !SameSettings(s.settings, s.saved); }
+bool Dirty(const AppState& s) {
+    return !SameSettings(s.settings, s.saved) || s.plugin_dirty;
+}
 
 bool Hover(const AppState& s, Box b) {
     return s.mouse_in && s.menu == Menu::None && b.Contains(s.mx, s.my);
@@ -503,7 +750,7 @@ void BuildLayout(AppState& s) {
     const float x0 = kSidebar + kMargin;
     const float x1 = w - kMargin;
 
-    for (int i = 0; i < 4; ++i) {
+    for (int i = 0; i < 5; ++i) {
         l.nav[i] = Box{16.f, 116.f + i * 52.f, kSidebar - 16.f,
                        156.f + i * 52.f};
     }
@@ -545,6 +792,90 @@ void BuildLayout(AppState& s) {
                        card2_top + 158.f};
         l.size = Box{right - 220.f, card2_top + 178.f, right,
                      card2_top + 214.f};
+    } else if (s.page == Page::Plugins) {
+        const float left = x0;
+        const float right = x1;
+        const std::vector<std::wstring> presets = PresetList(s);
+        l.preset_count = std::min(static_cast<int>(presets.size()), 8);
+        const float gap = 8.f;
+        const float chip_w = (right - left - gap * 3.f) / 4.f;
+        for (int i = 0; i < l.preset_count; ++i) {
+            const float chip_left = left + (i % 4) * (chip_w + gap);
+            const float chip_top = 134.f + (i / 4) * 36.f;
+            l.preset[i] = Box{chip_left, chip_top, chip_left + chip_w,
+                              chip_top + 30.f};
+        }
+        l.restore = Box{right - 92.f, 102.f, right - 16.f, 128.f};
+
+        l.plug_view = Box{left, 256.f, right, h - 84.f};
+        l.plug_rows.clear();
+        float y = l.plug_view.t - s.plugin_scroll;
+        std::string last_role;
+        for (int i = 0; i < static_cast<int>(s.edit_plugins.size()); ++i) {
+            const EditPlugin& entry = s.edit_plugins[i];
+            const PluginMeta* meta =
+                entry.meta >= 0 ? &s.catalog[entry.meta] : nullptr;
+            const std::string role =
+                meta && !meta->role.empty() ? meta->role : entry.plugin.role;
+            if (i == 0 || role != last_role) {
+                y += 24.f;
+                last_role = role;
+            }
+            const bool expanded = i == s.plugin_selected;
+            const bool has_desc = meta && !meta->description.empty();
+            const int specs =
+                meta ? static_cast<int>(meta->settings.size()) : 0;
+            float height = 40.f;
+            if (expanded) {
+                height += 8.f;
+                if (has_desc) height += 22.f;
+                height += specs * 30.f;
+                height += 6.f;
+            }
+
+            PlugRow row;
+            row.plugin = i;
+            row.expanded = expanded;
+            row.card = Box{left + 28.f, y, right, y + height};
+            row.toggle = Box{right - 56.f, y + 10.f, right - 20.f, y + 30.f};
+            if (expanded && meta) {
+                float control_top = y + 48.f + (has_desc ? 22.f : 0.f);
+                for (int j = 0; j < specs; ++j) {
+                    const PluginSettingSpec& spec = meta->settings[j];
+                    PlugControl control;
+                    control.spec = j;
+                    if (spec.type == "bool") {
+                        control.kind = PlugControl::Kind::Bool;
+                        control.box = Box{right - 56.f, control_top + 5.f,
+                                          right - 20.f, control_top + 25.f};
+                    } else if (spec.type == "int") {
+                        control.kind = PlugControl::Kind::Int;
+                        control.box = Box{right - 270.f, control_top,
+                                          right - 64.f, control_top + 30.f};
+                    } else if (spec.type == "enum") {
+                        control.kind = PlugControl::Kind::Enum;
+                        control.segments =
+                            static_cast<int>(spec.values.size());
+                        control.box = Box{right - 300.f, control_top + 2.f,
+                                          right - 16.f, control_top + 28.f};
+                    } else {
+                        control_top += 30.f;
+                        continue;  // strings have no editor
+                    }
+                    row.controls.push_back(control);
+                    control_top += 30.f;
+                }
+            }
+            l.plug_rows.push_back(std::move(row));
+            y += height + 6.f;
+        }
+        l.plug_content = y - (l.plug_view.t - s.plugin_scroll);
+        const float max_scroll = std::max(0.f, l.plug_content - l.plug_view.H());
+        if (s.plugin_scroll > max_scroll) {
+            s.plugin_scroll = max_scroll;
+            BuildLayout(s);  // re-run once with the clamped offset
+            return;
+        }
     } else if (s.page == Page::Dictionary) {
         constexpr int kTools = 7;
         constexpr float kGap = 8.f;
@@ -602,7 +933,7 @@ int HitTest(const AppState& s, float x, float y) {
         }
         return kNone;
     }
-    for (int i = 0; i < 4; ++i) {
+    for (int i = 0; i < 5; ++i) {
         if (s.layout.nav[i].Contains(x, y)) return kNavGeneral + i;
     }
     if (s.page == Page::General) {
@@ -622,6 +953,29 @@ int HitTest(const AppState& s, float x, float y) {
         if (s.layout.size.Contains(x, y)) {
             const float seg = (x - s.layout.size.l) / (s.layout.size.W() / 3.f);
             return kSizeSmall + std::clamp(static_cast<int>(seg), 0, 2);
+        }
+    } else if (s.page == Page::Plugins) {
+        for (int i = 0; i < s.layout.preset_count; ++i) {
+            if (s.layout.preset[i].Contains(x, y)) return kPreset + i;
+        }
+        if ((s.plugin_dirty || s.plugin_chain == "custom") &&
+            s.layout.restore.Contains(x, y)) {
+            return kRestore;
+        }
+        if (s.layout.plug_view.Contains(x, y)) {
+            for (const PlugRow& row : s.layout.plug_rows) {
+                if (!row.card.Contains(x, y)) continue;
+                if (!s.edit_plugins[row.plugin].structural &&
+                    row.toggle.Contains(x, y)) {
+                    return kPlugToggle + row.plugin;
+                }
+                for (const PlugControl& control : row.controls) {
+                    if (control.box.Contains(x, y)) {
+                        return kPlugSetting + row.plugin * 32 + control.spec;
+                    }
+                }
+                return kPlugCard + row.plugin;
+            }
         }
     } else if (s.page == Page::Dictionary) {
         for (int i = 0; i < 7; ++i) {
@@ -744,11 +1098,12 @@ void DrawSidebar(AppState& s) {
     DrawText(s, s.f_small.Get(), L"Windows 输入法",
              Box{72.f, 46.f, kSidebar - 12.f, 64.f}, p.secondary);
 
-    const Page pages[4] = {Page::General, Page::Appearance, Page::Dictionary,
-                           Page::About};
-    const wchar_t* names[4] = {L"常规", L"外观", L"词库", L"关于"};
-    const int ids[4] = {kNavGeneral, kNavAppearance, kNavDictionary, kNavAbout};
-    for (int i = 0; i < 4; ++i) {
+    const Page pages[5] = {Page::General, Page::Appearance, Page::Plugins,
+                           Page::Dictionary, Page::About};
+    const wchar_t* names[5] = {L"常规", L"外观", L"插件", L"词库", L"关于"};
+    const int ids[5] = {kNavGeneral, kNavAppearance, kNavPlugins,
+                        kNavDictionary, kNavAbout};
+    for (int i = 0; i < 5; ++i) {
         const Box& b = s.layout.nav[i];
         const bool selected = s.page == pages[i];
         if (selected) {
@@ -974,6 +1329,256 @@ void DrawAppearancePage(AppState& s) {
     DrawSegmented(s, s.layout.size, kSizeLabels, 3, size_index, kSizeSmall);
 }
 
+// ---- plugin chain page -----------------------------------------------------
+
+ChainValue CurrentValue(const EditPlugin& entry,
+                        const PluginSettingSpec& spec) {
+    for (const ChainSetting& setting : entry.plugin.settings) {
+        if (setting.key == spec.key) return setting.value;
+    }
+    return spec.def;
+}
+
+void DrawMiniToggle(AppState& s, const Box& b, bool on) {
+    const Palette p = Pal(s.system_dark);
+    FillBox(s, b, b.H() / 2.f, on ? p.accent : p.track);
+    const float knob = b.H() - 6.f;
+    const float cx = on ? b.r - 3.f - knob / 2.f : b.l + 3.f + knob / 2.f;
+    FillEllipse(s, cx, b.t + b.H() / 2.f, knob / 2.f, Rgb(255, 255, 255));
+}
+
+void DrawSlider(AppState& s, const Box& b, const PluginSettingSpec& spec,
+                const ChainValue& value) {
+    const Palette p = Pal(s.system_dark);
+    const float min_value = static_cast<float>(spec.min);
+    const float max_value =
+        spec.max > spec.min ? static_cast<float>(spec.max)
+                            : min_value + 1.f;
+    const float raw = static_cast<float>(value.integer);
+    const float t = std::clamp((raw - min_value) / (max_value - min_value),
+                               0.f, 1.f);
+    const float cy = b.t + b.H() / 2.f;
+    FillBox(s, Box{b.l, cy - 3.f, b.r, cy + 3.f}, 3.f, p.track);
+    FillBox(s, Box{b.l, cy - 3.f, b.l + b.W() * t, cy + 3.f}, 3.f, p.accent);
+    FillEllipse(s, b.l + b.W() * t, cy, 7.f, p.card);
+    FillEllipse(s, b.l + b.W() * t, cy, 5.5f, p.accent);
+}
+
+void DrawPluginsPage(AppState& s) {
+    const Palette p = Pal(s.system_dark);
+    const float x0 = kSidebar + kMargin;
+    const float x1 = s.width - kMargin;
+    const std::vector<std::wstring> presets = PresetList(s);
+    const bool customized = s.plugin_dirty || s.plugin_chain == "custom";
+
+    // Preset card.
+    const Box card1{x0, 92.f, x1, 204.f};
+    DrawCard(s, card1);
+    DrawText(s, s.f_section.Get(), L"方案预设",
+             Box{x0 + 20.f, 100.f, x1 - 210.f, 118.f}, p.text);
+    DrawText(s, s.f_small.Get(), L"选一个起点，再按需开关插件、微调参数",
+             Box{x0 + 20.f, 117.f, x1 - 110.f, 131.f}, p.secondary);
+    if (customized) {
+        DrawText(s, s.f_badge.Get(), L"已自定义",
+                 Box{x1 - 196.f, 104.f, x1 - 104.f, 126.f}, p.accent,
+                 DWRITE_TEXT_ALIGNMENT_TRAILING);
+        DrawButton(s, s.layout.restore, L"还原", kRestore,
+                   ButtonKind::Secondary);
+    }
+    for (int i = 0; i < s.layout.preset_count; ++i) {
+        const Box& chip = s.layout.preset[i];
+        const bool selected =
+            !s.plugin_choice.empty() &&
+            s.plugin_choice == ToUtf8(presets[i]);
+        const bool hot = Hover(s, chip);
+        FillBox(s, chip, 8.f, selected ? p.accent_soft : p.bg);
+        StrokeBox(s, chip, 8.f, selected ? p.accent : (hot ? p.secondary
+                                                           : p.border),
+                  selected ? 1.4f : 1.f);
+        DrawText(s, selected ? s.f_button.Get() : s.f_value.Get(),
+                 ChainLabel(presets[i]),
+                 Box{chip.l + 8.f, chip.t, chip.r - 8.f, chip.b},
+                 selected ? p.accent : p.text, DWRITE_TEXT_ALIGNMENT_CENTER);
+        if (selected && s.plugin_dirty) {
+            FillEllipse(s, chip.r - 10.f, chip.t + 10.f, 3.f, p.accent);
+        }
+    }
+
+    // Pipeline card.
+    const Box card2{x0, 216.f, x1, s.height - 80.f};
+    DrawCard(s, card2);
+    DrawText(s, s.f_section.Get(), L"插件流水线",
+             Box{x0 + 20.f, 226.f, x1 - 200.f, 248.f}, p.text);
+    DrawText(s, s.f_small.Get(),
+             std::to_wstring(s.edit_plugins.size()) + L" 个插件",
+             Box{x0 + 20.f, 226.f, x1 - 20.f, 248.f}, p.secondary,
+             DWRITE_TEXT_ALIGNMENT_TRAILING);
+    DrawLine(s, x0 + 20.f, 252.f, x1 - 20.f, 252.f, p.border, 1.f);
+
+    const Box& view = s.layout.plug_view;
+    s.rt->PushAxisAlignedClip(
+        D2D1::RectF(view.l, view.t, view.r, view.b),
+        D2D1_ANTIALIAS_MODE_ALIASED);
+
+    std::string last_role;
+    for (const PlugRow& row : s.layout.plug_rows) {
+        const EditPlugin& entry = s.edit_plugins[row.plugin];
+        const PluginMeta* meta =
+            entry.meta >= 0 ? &s.catalog[entry.meta] : nullptr;
+        const std::string role =
+            meta && !meta->role.empty() ? meta->role : entry.plugin.role;
+
+        if (role != last_role) {
+            last_role = role;
+            const float top = row.card.t - 24.f;
+            FillEllipse(s, x0 + 10.f, top + 12.f, 4.f, RoleColor(role));
+            DrawText(s, s.f_small.Get(), RoleLabel(role),
+                     Box{x0 + 22.f, top, x0 + 90.f, top + 24.f},
+                     p.secondary);
+            const float label_w = MeasureText(s, s.f_small.Get(), RoleLabel(role));
+            DrawLine(s, x0 + 30.f + label_w, top + 12.f, x1 - 20.f,
+                     top + 12.f, p.border, 1.f);
+        }
+
+        const Box& card = row.card;
+        const bool enabled = entry.enabled;
+        FillBox(s, card, 10.f, p.bg);
+        StrokeBox(s, card, 10.f, row.expanded ? p.accent : p.border,
+                  row.expanded ? 1.4f : 1.f);
+        FillBox(s, Box{card.l, card.t + 8.f, card.l + 3.f, card.t + 32.f},
+                1.5f, enabled ? RoleColor(role) : p.track);
+
+        const std::wstring name = PluginName(entry.plugin.id);
+        DrawTextEllipsis(s, s.f_button.Get(), name,
+                         Box{card.l + 14.f, card.t + 3.f, card.r - 110.f,
+                             card.t + 24.f},
+                         enabled ? p.text : p.secondary);
+        std::wstring detail = ToWide(entry.plugin.id);
+        if (!entry.plugin.version.empty()) {
+            detail += L"  ·  v" + ToWide(entry.plugin.version);
+        }
+        if (!enabled) detail = L"已停用  ·  " + detail;
+        DrawTextEllipsis(s, s.f_small.Get(), detail,
+                         Box{card.l + 14.f, card.t + 21.f, card.r - 110.f,
+                             card.t + 37.f},
+                         p.secondary);
+
+        if (entry.structural) {
+            DrawText(s, s.f_small.Get(), L"必需",
+                     Box{card.r - 56.f, card.t + 10.f, card.r - 20.f,
+                         card.t + 30.f},
+                     p.secondary, DWRITE_TEXT_ALIGNMENT_CENTER);
+        } else {
+            DrawMiniToggle(s, row.toggle, enabled);
+            FocusRing(s, row.toggle, kPlugToggle + row.plugin,
+                      row.toggle.H() / 2.f);
+        }
+        FocusRing(s, card, kPlugCard + row.plugin, 10.f);
+
+        if (row.expanded) {
+            DrawLine(s, card.l + 16.f, card.t + 40.f, card.r - 16.f,
+                     card.t + 40.f, p.border, 1.f);
+            float control_top = card.t + 48.f;
+            if (meta && !meta->description.empty()) {
+                DrawTextEllipsis(s, s.f_desc.Get(), ToWide(meta->description),
+                                 Box{card.l + 20.f, card.t + 44.f,
+                                     card.r - 20.f, card.t + 66.f},
+                                 p.secondary);
+                control_top += 22.f;
+            }
+            if (meta) {
+                for (int j = 0; j < static_cast<int>(meta->settings.size());
+                     ++j) {
+                    const PluginSettingSpec& spec = meta->settings[j];
+                    const float top = control_top + j * 30.f;
+                    DrawText(s, s.f_desc.Get(), SettingLabel(spec.key),
+                             Box{card.l + 20.f, top, card.r - 320.f,
+                                 top + 30.f},
+                             p.secondary);
+                    const ChainValue value = CurrentValue(entry, spec);
+                    if (spec.type == "bool") {
+                        DrawMiniToggle(
+                            s, Box{card.r - 56.f, top + 5.f, card.r - 20.f,
+                                   top + 25.f},
+                            value.boolean);
+                    } else if (spec.type == "int") {
+                        DrawSlider(
+                            s, Box{card.r - 270.f, top, card.r - 64.f,
+                                   top + 30.f},
+                            spec, value);
+                        DrawText(s, s.f_value.Get(),
+                                 std::to_wstring(value.integer),
+                                 Box{card.r - 58.f, top, card.r - 16.f,
+                                     top + 30.f},
+                                 p.text, DWRITE_TEXT_ALIGNMENT_TRAILING);
+                    } else if (spec.type == "enum") {
+                        // The bundled chains use a handful of enum tokens;
+                        // show them in Chinese and fall back to the raw token.
+                        auto enum_label = [](const std::string& v) {
+                            if (v == "general") return std::wstring(L"通用");
+                            if (v == "chat") return std::wstring(L"聊天");
+                            if (v == "code") return std::wstring(L"代码");
+                            if (v == "formal") return std::wstring(L"正式");
+                            if (v == "zh") return std::wstring(L"中文");
+                            if (v == "en") return std::wstring(L"英文");
+                            if (v == "xiaohe") return std::wstring(L"小鹤");
+                            if (v == "ziranma") return std::wstring(L"自然码");
+                            if (v == "microsoft") return std::wstring(L"微软");
+                            if (v == "sogou") return std::wstring(L"搜狗");
+                            return ToWide(v);
+                        };
+                        std::vector<std::wstring> wide;
+                        std::vector<const wchar_t*> labels;
+                        int selected = 0;
+                        for (int v = 0;
+                             v < static_cast<int>(spec.values.size()); ++v) {
+                            wide.push_back(enum_label(spec.values[v]));
+                            if (spec.values[v] == value.text) selected = v;
+                        }
+                        for (const std::wstring& label : wide) {
+                            labels.push_back(label.c_str());
+                        }
+                        if (!labels.empty()) {
+                            DrawSegmented(
+                                s,
+                                Box{card.r - 300.f, top + 2.f, card.r - 16.f,
+                                    top + 28.f},
+                                labels.data(),
+                                static_cast<int>(labels.size()), selected,
+                                -1000);
+                        }
+                    } else {
+                        const bool secret = spec.type == "secret";
+                        const std::wstring text =
+                            secret && !value.text.empty()
+                                ? std::wstring(6, L'•')
+                                : (value.text.empty() ? L"未设置"
+                                                      : ToWide(value.text));
+                        DrawTextEllipsis(
+                            s, s.f_small.Get(), text,
+                            Box{card.r - 300.f, top, card.r - 16.f,
+                                top + 30.f},
+                            p.secondary, DWRITE_TEXT_ALIGNMENT_TRAILING);
+                    }
+                }
+                for (const PlugControl& control : row.controls) {
+                    FocusRing(s, control.box,
+                              kPlugSetting + row.plugin * 32 + control.spec,
+                              6.f);
+                }
+            }
+        }
+    }
+
+    s.rt->PopAxisAlignedClip();
+
+    if (s.edit_plugins.empty()) {
+        DrawText(s, s.f_desc.Get(), L"这个方案没有可显示的插件。",
+                 Box{x0 + 20.f, view.t + 12.f, x1 - 20.f, view.t + 40.f},
+                 p.secondary);
+    }
+}
+
 void DrawAboutPage(AppState& s) {
     const Palette p = Pal(s.system_dark);
     const float x0 = kSidebar + kMargin;
@@ -1138,6 +1743,9 @@ void DrawFooter(AppState& s) {
     D2D1_COLOR_F color = p.secondary;
     if (Dirty(s)) {
         message = L"有未保存的更改";
+    } else if (s.page == Page::Plugins && !s.plugin_status.empty()) {
+        message = s.plugin_status;
+        color = s.plugin_status_ok ? p.accent : p.danger;
     } else if (!s.status.empty()) {
         message = s.status;
         color = s.status_ok ? p.accent : p.danger;
@@ -1212,6 +1820,11 @@ void Draw(AppState& s) {
             DrawPageHeader(s, L"外观", L"主题与候选窗口样式");
             DrawAppearancePage(s);
             break;
+        case Page::Plugins:
+            DrawPageHeader(s, L"插件",
+                           L"方案由一串插件按顺序组合而成；点开任一插件即可调参");
+            DrawPluginsPage(s);
+            break;
         case Page::Dictionary:
             DrawPageHeader(s, L"词库",
                            L"自造词与学习到的词；支持导入导出 Rime 词库");
@@ -1233,13 +1846,311 @@ void Invalidate(AppState& s, HWND window) {
     InvalidateRect(window, nullptr, FALSE);
 }
 
+// ---- plugin chain editing --------------------------------------------------
+
+void EnsureCatalog(AppState& s) {
+    if (s.catalog_loaded) return;
+    s.catalog =
+        LoadPluginCatalog(PathJoin(ModuleDirectory(nullptr), L"plugins"));
+    s.catalog_loaded = true;
+}
+
+// Prefers the writable user directory, matching the engine's lookup order.
+bool ReadStemDoc(const std::string& stem, ChainDoc* doc) {
+    const std::wstring name = ToWide(stem) + L".cbor";
+    std::wstring path =
+        PathJoin(PathJoin(DataDirectory(), L"chains"), name);
+    if (!FileExists(path)) {
+        path = PathJoin(PathJoin(ModuleDirectory(nullptr), L"chains"), name);
+    }
+    std::string error;
+    return ReadChainFile(path, doc, &error);
+}
+
+void AttachMeta(AppState& s) {
+    for (EditPlugin& entry : s.edit_plugins) {
+        entry.meta = -1;
+        for (int i = 0; i < static_cast<int>(s.catalog.size()); ++i) {
+            const PluginMeta& meta = s.catalog[i];
+            if (meta.id != entry.plugin.id) continue;
+            if (!entry.plugin.version.empty() &&
+                meta.version != entry.plugin.version) {
+                continue;
+            }
+            entry.meta = i;
+            break;
+        }
+    }
+}
+
+// The structural plugins make the chain work at all: without a parse or a
+// rank stage the engine rejects the build, so the UI does not let them be
+// switched off. The first translate is the primary one (rank depends on it).
+void MarkStructural(AppState& s) {
+    int first_translate = -1;
+    for (int i = 0; i < static_cast<int>(s.edit_plugins.size()); ++i) {
+        const EditPlugin& entry = s.edit_plugins[i];
+        const std::string role =
+            entry.meta >= 0 ? s.catalog[entry.meta].role : entry.plugin.role;
+        if (role == "translate" && first_translate < 0) first_translate = i;
+    }
+    for (int i = 0; i < static_cast<int>(s.edit_plugins.size()); ++i) {
+        EditPlugin& entry = s.edit_plugins[i];
+        const std::string role =
+            entry.meta >= 0 ? s.catalog[entry.meta].role : entry.plugin.role;
+        entry.structural =
+            role == "preprocess" || role == "parse" || role == "rank" ||
+            role == "format" || role == "recognize" || role.empty() ||
+            i == first_translate;
+    }
+}
+
+void LoadPluginsEditor(AppState& s) {
+    EnsureCatalog(s);
+    s.plugins_loaded = false;
+    s.edit_plugins.clear();
+    s.plugin_selected = -1;
+    s.plugin_scroll = 0;
+    s.plugin_dirty = false;
+    s.plugin_status.clear();
+    s.plugin_status_ok = true;
+
+    const std::string stem = ToUtf8(ChainName(s.settings.chain));
+    const bool custom = stem == "custom";
+    ChainDoc doc;
+    if (!ReadStemDoc(stem, &doc)) {
+        s.plugin_chain = stem;
+        s.plugin_choice = custom ? "default" : stem;
+        s.plugins_loaded = true;
+        s.plugin_status = L"无法读取方案文件，插件列表不可用。";
+        s.plugin_status_ok = false;
+        return;
+    }
+
+    std::string base = stem;
+    if (custom) {
+        base = doc.base.empty() ? "default" : doc.base;
+        ChainDoc base_doc;
+        if (ReadStemDoc(base, &base_doc) && !base_doc.plugins.empty()) {
+            for (const ChainPlugin& plugin : base_doc.plugins) {
+                EditPlugin entry;
+                entry.plugin = plugin;
+                for (const ChainPlugin& override : doc.plugins) {
+                    if (override.id == plugin.id) {
+                        entry.plugin.settings = override.settings;
+                        break;
+                    }
+                }
+                entry.enabled =
+                    std::find(doc.disabled.begin(), doc.disabled.end(),
+                              plugin.id) == doc.disabled.end();
+                s.edit_plugins.push_back(std::move(entry));
+            }
+        } else {
+            for (const ChainPlugin& plugin : doc.plugins) {
+                EditPlugin entry;
+                entry.plugin = plugin;
+                s.edit_plugins.push_back(std::move(entry));
+            }
+        }
+    } else {
+        for (const ChainPlugin& plugin : doc.plugins) {
+            EditPlugin entry;
+            entry.plugin = plugin;
+            s.edit_plugins.push_back(std::move(entry));
+        }
+    }
+
+    s.plugin_chain = stem;
+    s.plugin_choice = base;
+    AttachMeta(s);
+    MarkStructural(s);
+    s.plugins_loaded = true;
+}
+
+void SelectPreset(AppState& s, HWND window, int index) {
+    const std::vector<std::wstring> presets = PresetList(s);
+    if (index < 0 || index >= static_cast<int>(presets.size())) return;
+    const std::string stem = ToUtf8(presets[index]);
+    ChainDoc doc;
+    if (!ReadStemDoc(stem, &doc)) {
+        s.plugin_status = L"无法读取「" + ChainLabel(presets[index]) + L"」";
+        s.plugin_status_ok = false;
+        Invalidate(s, window);
+        return;
+    }
+    EnsureCatalog(s);
+    s.edit_plugins.clear();
+    for (const ChainPlugin& plugin : doc.plugins) {
+        EditPlugin entry;
+        entry.plugin = plugin;
+        s.edit_plugins.push_back(std::move(entry));
+    }
+    s.plugin_chain = stem;
+    s.plugin_choice = stem;
+    s.plugin_dirty = false;
+    s.plugin_selected = -1;
+    s.plugin_scroll = 0;
+    AttachMeta(s);
+    MarkStructural(s);
+    s.plugin_status = L"已选择「" + ChainLabel(presets[index]) +
+                      L"」，保存后生效";
+    s.plugin_status_ok = true;
+    Invalidate(s, window);
+}
+
+void RestorePreset(AppState& s, HWND window) {
+    const std::vector<std::wstring> presets = PresetList(s);
+    int index = -1;
+    for (int i = 0; i < static_cast<int>(presets.size()); ++i) {
+        if (ToUtf8(presets[i]) == s.plugin_choice) index = i;
+    }
+    if (index < 0 && !presets.empty()) index = 0;
+    SelectPreset(s, window, index);
+    s.plugin_status = L"已还原为预设默认";
+    s.plugin_status_ok = true;
+    Invalidate(s, window);
+}
+
+void SetPluginSetting(AppState& s, int plugin, int spec_index,
+                      const ChainValue& value) {
+    if (plugin < 0 || plugin >= static_cast<int>(s.edit_plugins.size())) return;
+    EditPlugin& entry = s.edit_plugins[plugin];
+    if (entry.meta < 0) return;
+    const PluginMeta& meta = s.catalog[entry.meta];
+    if (spec_index < 0 || spec_index >= static_cast<int>(meta.settings.size())) {
+        return;
+    }
+    const PluginSettingSpec& spec = meta.settings[spec_index];
+    for (ChainSetting& setting : entry.plugin.settings) {
+        if (setting.key == spec.key) {
+            setting.value = value;
+            s.plugin_dirty = true;
+            return;
+        }
+    }
+    entry.plugin.settings.push_back(ChainSetting{spec.key, value});
+    s.plugin_dirty = true;
+}
+
+// Applies a pointer position to an int control.
+void DragPluginSetting(AppState& s, int id, float x) {
+    if (id < kPlugSetting) return;
+    const int plugin = (id - kPlugSetting) / 32;
+    const int spec_index = (id - kPlugSetting) % 32;
+    if (plugin < 0 || plugin >= static_cast<int>(s.edit_plugins.size())) return;
+    const EditPlugin& entry = s.edit_plugins[plugin];
+    if (entry.meta < 0) return;
+    const PluginMeta& meta = s.catalog[entry.meta];
+    if (spec_index >= static_cast<int>(meta.settings.size())) return;
+    const PluginSettingSpec& spec = meta.settings[spec_index];
+    if (spec.type != "int" || spec.max <= spec.min) return;
+
+    // The track is the control box minus the trailing value label.
+    const Box track{s.width - kMargin - 270.f, 0.f, s.width - kMargin - 64.f,
+                    0.f};
+    const float t =
+        std::clamp((x - track.l) / std::max(1.f, track.W()), 0.f, 1.f);
+    ChainValue value;
+    value.kind = ChainValue::Kind::Int;
+    value.integer = spec.min + static_cast<int64_t>(
+                                    std::lround(t * (spec.max - spec.min)));
+    SetPluginSetting(s, plugin, spec_index, value);
+}
+
+// Keyboard/activation path: one step on an int, next value on an enum, a flip
+// on a bool.
+void StepPluginSetting(AppState& s, int id, int direction) {
+    if (id < kPlugSetting) return;
+    const int plugin = (id - kPlugSetting) / 32;
+    const int spec_index = (id - kPlugSetting) % 32;
+    if (plugin < 0 || plugin >= static_cast<int>(s.edit_plugins.size())) return;
+    EditPlugin& entry = s.edit_plugins[plugin];
+    if (entry.meta < 0) return;
+    const PluginMeta& meta = s.catalog[entry.meta];
+    if (spec_index >= static_cast<int>(meta.settings.size())) return;
+    const PluginSettingSpec& spec = meta.settings[spec_index];
+    const ChainValue current = CurrentValue(entry, spec);
+
+    if (spec.type == "bool") {
+        ChainValue value;
+        value.kind = ChainValue::Kind::Bool;
+        value.boolean = !current.boolean;
+        SetPluginSetting(s, plugin, spec_index, value);
+    } else if (spec.type == "enum" && !spec.values.empty()) {
+        int index = 0;
+        for (int i = 0; i < static_cast<int>(spec.values.size()); ++i) {
+            if (spec.values[i] == current.text) index = i;
+        }
+        const int count = static_cast<int>(spec.values.size());
+        index = ((index + direction) % count + count) % count;
+        ChainValue value;
+        value.kind = ChainValue::Kind::Text;
+        value.text = spec.values[index];
+        SetPluginSetting(s, plugin, spec_index, value);
+    } else if (spec.type == "int" && spec.max > spec.min) {
+        const int64_t step =
+            std::max<int64_t>(1, (spec.max - spec.min) / 100);
+        ChainValue value;
+        value.kind = ChainValue::Kind::Int;
+        value.integer =
+            std::clamp<int64_t>(current.integer + direction * step, spec.min,
+                                spec.max);
+        SetPluginSetting(s, plugin, spec_index, value);
+    }
+}
+
+void TogglePlugin(AppState& s, int plugin) {
+    if (plugin < 0 || plugin >= static_cast<int>(s.edit_plugins.size())) return;
+    EditPlugin& entry = s.edit_plugins[plugin];
+    if (entry.structural) return;
+    entry.enabled = !entry.enabled;
+    s.plugin_dirty = true;
+}
+
 void ApplySettings(AppState& s, HWND window) {
     Settings out = s.settings;
+
+    if (s.plugins_loaded) {
+        if (s.plugin_dirty) {
+            ChainDoc doc;
+            doc.base = s.plugin_choice;
+            for (const EditPlugin& entry : s.edit_plugins) {
+                if (entry.enabled) {
+                    doc.plugins.push_back(entry.plugin);
+                } else {
+                    doc.disabled.push_back(entry.plugin.id);
+                }
+            }
+            const std::wstring dir = PathJoin(DataDirectory(), L"chains");
+            std::string error;
+            if (!EnsureDirectory(dir) ||
+                !WriteChainFile(PathJoin(dir, L"custom.cbor"), doc, &error)) {
+                s.status = L"保存自定义方案失败：" + ToWide(error);
+                s.status_ok = false;
+                Invalidate(s, window);
+                return;
+            }
+            out.chain = L"custom.cbor";
+            s.plugin_chain = "custom";
+            s.plugin_dirty = false;
+            if (std::find(s.chains.begin(), s.chains.end(), L"custom") ==
+                s.chains.end()) {
+                s.chains.push_back(L"custom");
+            }
+        } else if (!s.plugin_chain.empty()) {
+            out.chain = ToWide(s.plugin_chain) + L".cbor";
+        }
+    }
+
     SaveSettings(out);
+    s.settings = out;
     s.saved = out;
     NotifyConfigChanged();
     s.status = L"设置已保存并应用";
     s.status_ok = true;
+    s.plugin_status = L"已保存并应用";
+    s.plugin_status_ok = true;
     Invalidate(s, window);
 }
 
@@ -1584,6 +2495,7 @@ void ActivateById(AppState& s, HWND window, int id) {
     switch (id) {
         case kNavGeneral:
         case kNavAppearance:
+        case kNavPlugins:
         case kNavDictionary:
         case kNavAbout:
             s.page = static_cast<Page>(id - kNavGeneral);
@@ -1592,6 +2504,9 @@ void ActivateById(AppState& s, HWND window, int id) {
             if (s.page == Page::Dictionary && !s.dict_loaded) {
                 LoadDict(s, window);
                 return;
+            }
+            if (s.page == Page::Plugins && !s.plugins_loaded) {
+                LoadPluginsEditor(s);
             }
             Invalidate(s, window);
             return;
@@ -1693,6 +2608,32 @@ void ActivateById(AppState& s, HWND window, int id) {
     }
 }
 
+// Keeps the card being opened in view. A card taller than the viewport keeps
+// its header at the top rather than scrolling past it.
+void EnsurePluginVisible(AppState& s, int plugin) {
+    BuildLayout(s);
+    const Box& view = s.layout.plug_view;
+    for (const PlugRow& row : s.layout.plug_rows) {
+        if (row.plugin != plugin) continue;
+        if (row.card.H() >= view.H()) {
+            s.plugin_scroll += row.card.t - view.t;
+        } else if (row.card.b > view.b) {
+            s.plugin_scroll += row.card.b - view.b;
+        } else if (row.card.t < view.t) {
+            s.plugin_scroll -= view.t - row.card.t;
+        }
+        BuildLayout(s);
+        return;
+    }
+}
+
+void SelectPluginRow(AppState& s, HWND window, int plugin) {
+    s.plugin_selected = s.plugin_selected == plugin ? -1 : plugin;
+    s.plugin_scroll = std::max(0.f, s.plugin_scroll);
+    EnsurePluginVisible(s, plugin);
+    InvalidateRect(window, nullptr, FALSE);
+}
+
 void Click(AppState& s, HWND window, float x, float y) {
     if (s.menu != Menu::None) {
         const int hit = HitTest(s, x, y);
@@ -1700,6 +2641,14 @@ void Click(AppState& s, HWND window, float x, float y) {
             const int index = hit - kMenuItem;
             if (s.menu == Menu::Chain && index < static_cast<int>(s.chains.size())) {
                 s.settings.chain = s.chains[index] + L".cbor";
+                // The plugin editor holds a snapshot of the old chain; force a
+                // reload so Apply cannot write it back over this choice.
+                s.plugins_loaded = false;
+                s.edit_plugins.clear();
+                s.plugin_selected = -1;
+                s.plugin_dirty = false;
+                s.plugin_chain.clear();
+                s.plugin_choice.clear();
             } else if (s.menu == Menu::PageSize && index < 7) {
                 s.settings.page_size = static_cast<uint32_t>(index + 3);
             }
@@ -1710,11 +2659,53 @@ void Click(AppState& s, HWND window, float x, float y) {
     }
     const int hit = HitTest(s, x, y);
     if (hit == kNone) return;
-    if (hit >= kDictRow) {
+    if (s.page == Page::Dictionary && hit >= kDictRow) {
         s.dict_selected = hit - kDictRow;
         s.focus = kNone;
         Invalidate(s, window);
         return;
+    }
+    if (s.page == Page::Plugins) {
+        if (hit >= kPreset && hit < kPreset + s.layout.preset_count) {
+            s.focus = hit;
+            SelectPreset(s, window, hit - kPreset);
+            return;
+        }
+        if (hit == kRestore) {
+            s.focus = hit;
+            RestorePreset(s, window);
+            return;
+        }
+        if (hit >= kPlugCard && hit < kPlugToggle) {
+            s.focus = hit;
+            SelectPluginRow(s, window, hit - kPlugCard);
+            return;
+        }
+        if (hit >= kPlugToggle && hit < kPlugSetting) {
+            TogglePlugin(s, hit - kPlugToggle);
+            s.focus = hit;
+            Invalidate(s, window);
+            return;
+        }
+        if (hit >= kPlugSetting) {
+            const int plugin = (hit - kPlugSetting) / 32;
+            const int spec = (hit - kPlugSetting) % 32;
+            if (plugin < static_cast<int>(s.edit_plugins.size()) &&
+                s.edit_plugins[plugin].meta >= 0) {
+                const PluginMeta& meta = s.catalog[s.edit_plugins[plugin].meta];
+                if (spec < static_cast<int>(meta.settings.size()) &&
+                    meta.settings[spec].type == "int") {
+                    DragPluginSetting(s, hit, x);
+                    s.plugin_drag = hit;
+                    SetCapture(window);
+                } else {
+                    StepPluginSetting(s, hit, 1);
+                }
+            }
+            s.focus = hit;
+            Invalidate(s, window);
+            return;
+        }
     }
     s.focus = hit;
     s.focus_visible = false;
@@ -1722,8 +2713,8 @@ void Click(AppState& s, HWND window, float x, float y) {
 }
 
 std::vector<int> FocusOrder(const AppState& s) {
-    std::vector<int> order = {kNavGeneral, kNavAppearance, kNavDictionary,
-                              kNavAbout};
+    std::vector<int> order = {kNavGeneral, kNavAppearance, kNavPlugins,
+                              kNavDictionary, kNavAbout};
     if (s.page == Page::General) {
         order.push_back(kChain);
         order.push_back(kPageSize);
@@ -1739,6 +2730,23 @@ std::vector<int> FocusOrder(const AppState& s) {
         order.push_back(kSizeSmall);
         order.push_back(kSizeMid);
         order.push_back(kSizeLarge);
+    } else if (s.page == Page::Plugins) {
+        for (int i = 0; i < s.layout.preset_count; ++i) {
+            order.push_back(kPreset + i);
+        }
+        if (s.plugin_dirty || s.plugin_chain == "custom") {
+            order.push_back(kRestore);
+        }
+        for (const PlugRow& row : s.layout.plug_rows) {
+            order.push_back(kPlugCard + row.plugin);
+            if (!s.edit_plugins[row.plugin].structural) {
+                order.push_back(kPlugToggle + row.plugin);
+            }
+            for (const PlugControl& control : row.controls) {
+                order.push_back(kPlugSetting + row.plugin * 32 +
+                                control.spec);
+            }
+        }
     } else if (s.page == Page::Dictionary) {
         for (int id = kDictAdd; id <= kDictRefresh; ++id) order.push_back(id);
     } else {
@@ -1881,6 +2889,11 @@ LRESULT CALLBACK WndProc(HWND window, UINT message, WPARAM wparam,
             const float y = static_cast<float>(GET_Y_LPARAM(lparam));
             s->mx = x * 96.f / static_cast<float>(s->dpi);
             s->my = y * 96.f / static_cast<float>(s->dpi);
+            if (s->plugin_drag != kNone) {
+                DragPluginSetting(*s, s->plugin_drag, s->mx);
+                InvalidateRect(window, nullptr, FALSE);
+                return 0;
+            }
             if (!s->mouse_in) {
                 s->mouse_in = true;
                 TRACKMOUSEEVENT track{sizeof(track), TME_LEAVE, window, 0};
@@ -1903,6 +2916,13 @@ LRESULT CALLBACK WndProc(HWND window, UINT message, WPARAM wparam,
                   y * 96.f / static_cast<float>(s->dpi));
             return 0;
         }
+        case WM_LBUTTONUP:
+            if (s && s->plugin_drag != kNone) {
+                s->plugin_drag = kNone;
+                ReleaseCapture();
+                return 0;
+            }
+            break;
         case WM_LBUTTONDBLCLK: {
             if (!s) break;
             const float x = static_cast<float>(GET_X_LPARAM(lparam));
@@ -1919,7 +2939,24 @@ LRESULT CALLBACK WndProc(HWND window, UINT message, WPARAM wparam,
             return 0;
         }
         case WM_MOUSEWHEEL: {
-            if (!s || s->page != Page::Dictionary) break;
+            if (!s) break;
+            if (s->page == Page::Plugins) {
+                POINT point{GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam)};
+                ScreenToClient(window, &point);
+                const float px = point.x * 96.f / static_cast<float>(s->dpi);
+                const float py = point.y * 96.f / static_cast<float>(s->dpi);
+                if (!s->layout.plug_view.Contains(px, py)) break;
+                const float step = GET_WHEEL_DELTA_WPARAM(wparam) > 0 ? -56.f
+                                                                      : 56.f;
+                const float max_scroll =
+                    std::max(0.f, s->layout.plug_content -
+                                      s->layout.plug_view.H());
+                s->plugin_scroll =
+                    std::clamp(s->plugin_scroll + step, 0.f, max_scroll);
+                Invalidate(*s, window);
+                return 0;
+            }
+            if (s->page != Page::Dictionary) break;
             POINT point{GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam)};
             ScreenToClient(window, &point);
             if (!s->layout.dict_list.Contains(
@@ -1975,8 +3012,38 @@ LRESULT CALLBACK WndProc(HWND window, UINT message, WPARAM wparam,
                 InvalidateRect(window, nullptr, FALSE);
                 return 0;
             }
+            if (s->page == Page::Plugins &&
+                (wparam == VK_LEFT || wparam == VK_RIGHT) &&
+                s->focus >= kPlugSetting) {
+                StepPluginSetting(*s, s->focus,
+                                  wparam == VK_RIGHT ? 1 : -1);
+                InvalidateRect(window, nullptr, FALSE);
+                return 0;
+            }
             if ((wparam == VK_RETURN || wparam == VK_SPACE) &&
                 s->focus != kNone) {
+                if (s->focus >= kPreset && s->focus < kRestore) {
+                    SelectPreset(*s, window, s->focus - kPreset);
+                    return 0;
+                }
+                if (s->focus == kRestore) {
+                    RestorePreset(*s, window);
+                    return 0;
+                }
+                if (s->focus >= kPlugCard && s->focus < kPlugToggle) {
+                    SelectPluginRow(*s, window, s->focus - kPlugCard);
+                    return 0;
+                }
+                if (s->focus >= kPlugToggle && s->focus < kPlugSetting) {
+                    TogglePlugin(*s, s->focus - kPlugToggle);
+                    InvalidateRect(window, nullptr, FALSE);
+                    return 0;
+                }
+                if (s->focus >= kPlugSetting) {
+                    StepPluginSetting(*s, s->focus, 1);
+                    InvalidateRect(window, nullptr, FALSE);
+                    return 0;
+                }
                 ActivateById(*s, window, s->focus);
                 return 0;
             }

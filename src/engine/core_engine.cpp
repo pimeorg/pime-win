@@ -61,8 +61,15 @@ std::string CorePath(const std::wstring& path) {
     return ToUtf8(path);
 }
 
-std::wstring ChainPath(const std::wstring& resources, const std::string& chain) {
-    return PathJoin(PathJoin(resources, L"chains"), ToWide(chain));
+// The settings window writes its adjusted chain into the per-user data
+// directory, which is writable even when the install lives under Program
+// Files. A user chain shadows a bundled one with the same name.
+std::wstring ChainPath(const std::wstring& resources, const std::wstring& data,
+                       const std::string& chain) {
+    const std::wstring name = ToWide(chain);
+    const std::wstring user = PathJoin(PathJoin(data, L"chains"), name);
+    if (FileExists(user)) return user;
+    return PathJoin(PathJoin(resources, L"chains"), name);
 }
 
 pime_status SinkComposition(void* ud, const pime_composition* value);
@@ -222,7 +229,8 @@ struct CoreEngine::Impl {
     bool ActivateChain(pime_core* instance, const std::string& chain,
                        uint64_t* out_generation) {
         std::vector<uint8_t> bytes;
-        const std::wstring path = ChainPath(config.resources_dir, chain);
+        const std::wstring path =
+            ChainPath(config.resources_dir, config.data_dir, chain);
         if (!ReadFileBytes(path, &bytes)) {
             WriteLog(LogLevel::Error, "chain",
                      "cannot read " + ToUtf8(path));
@@ -753,6 +761,12 @@ bool CoreEngine::SwitchChain(const std::string& chain) {
     if (!impl_ || !impl_->ready) return false;
     bool ok = false;
     impl_->Run([&] {
+        // Compare on the worker: every IPC client reloads settings at once, so
+        // a check on the caller's thread would let them all queue a rebuild.
+        if (chain == impl_->config.chain) {
+            ok = true;
+            return;
+        }
         uint64_t next = 0;
         if (!impl_->ActivateChain(impl_->core, chain, &next)) return;
         const uint64_t previous = impl_->generation;

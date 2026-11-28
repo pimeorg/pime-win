@@ -20,6 +20,8 @@ bool DirectoryExists(const std::wstring& path);
 bool FileExists(const std::wstring& path);
 bool EnsureDirectory(const std::wstring& path);
 bool ReadFileBytes(const std::wstring& path, std::vector<uint8_t>* out);
+bool WriteFileBytes(const std::wstring& path,
+                    const std::vector<uint8_t>& bytes);
 std::wstring LocalAppDataDirectory();
 std::wstring DataDirectory();
 

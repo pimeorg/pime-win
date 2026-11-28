@@ -597,8 +597,7 @@ void HandleMessage(Client* client, const Message& request) {
             // which is the only way a packaged host can see them.
             std::string chain;
             uint32_t page_size = 0;
-            if (reader.Str(&chain) && reader.U32(&page_size) && !chain.empty() &&
-                chain != ToUtf8(CoreEngine::Instance().active_chain())) {
+            if (reader.Str(&chain) && reader.U32(&page_size) && !chain.empty()) {
                 CoreEngine::Instance().SwitchChain(chain);
             }
             SendTo(client, HelloReply(request));

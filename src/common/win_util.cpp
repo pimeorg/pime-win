@@ -107,6 +107,21 @@ bool ReadFileBytes(const std::wstring& path, std::vector<uint8_t>* out) {
     return ok;
 }
 
+bool WriteFileBytes(const std::wstring& path,
+                    const std::vector<uint8_t>& bytes) {
+    HANDLE file = CreateFileW(path.c_str(), GENERIC_WRITE, 0, nullptr,
+                              CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (file == INVALID_HANDLE_VALUE) return false;
+    DWORD written = 0;
+    const bool ok =
+        bytes.empty() ||
+        (WriteFile(file, bytes.data(), static_cast<DWORD>(bytes.size()),
+                   &written, nullptr) &&
+         written == bytes.size());
+    CloseHandle(file);
+    return ok;
+}
+
 std::wstring LocalAppDataDirectory() {
     PWSTR raw = nullptr;
     if (FAILED(SHGetKnownFolderPath(FOLDERID_LocalAppData, 0, nullptr, &raw))) {
