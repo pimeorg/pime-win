@@ -94,6 +94,11 @@ public:
     void CloseSession(SessionId session);
     KeyResult Key(SessionId session, const KeyEvent& event);
     KeyResult Select(SessionId session, uint32_t index);
+    // Text around the caret, UTF-8. Dispatches a `surrounding` event so the
+    // predict plugins can suggest continuations; when no plugin proposes a
+    // strip the returned commands hide the prediction-only one.
+    KeyResult Surrounding(SessionId session, const std::string& before,
+                          const std::string& after);
     void Focus(SessionId session, bool focused);
     void Reset(SessionId session);
     void UpdateContext(SessionId session, const std::wstring& app,

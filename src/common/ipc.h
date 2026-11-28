@@ -45,6 +45,7 @@ enum class MsgKind : uint32_t {
     HideCandidates = 19,  // shell -> engine: the host went away, hide the strip
     UserDict = 20,        // shell -> engine: read/write the user dictionary
     UserDictReply = 21,
+    Surrounding = 22,     // shell -> engine: text around the caret
 };
 
 enum class UserDictOp : uint32_t {

@@ -37,6 +37,9 @@ constexpr uint32_t kHostCaps = 1u << 4;
 constexpr wchar_t kNotifyClassName[] = L"PimeNotifyWindow";
 constexpr DWORD kLangBarSinkCookie = 0x50494D45;  // 'PIME'
 constexpr UINT kMenuSettings = 1;
+// How much text on each side of the caret the predict plugins see.
+constexpr ULONG kSurroundingBefore = 64;
+constexpr ULONG kSurroundingAfter = 32;
 
 class TextServiceImpl;
 
@@ -831,6 +834,54 @@ private:
         return SUCCEEDED(request) ? session_result : request;
     }
 
+    // Reads the text around `anchor` by starting at the document edge and
+    // pinning the other end to the anchor. RichEdit's own selection range
+    // cannot be shifted once one of our commits has ended, but a range from
+    // the document edge still can.
+    void ReadSurrounding(TfEditCookie ec, std::wstring* before,
+                         std::wstring* after) {
+        ComPtr<ITfRange> anchor;
+        if (composition_range_) composition_range_->Clone(&anchor);
+        if (!anchor) {
+            TF_SELECTION selection{};
+            ULONG fetched = 0;
+            if (context_->GetSelection(ec, TF_DEFAULT_SELECTION, 1, &selection,
+                                       &fetched) != S_OK ||
+                fetched == 0) {
+                return;
+            }
+            anchor.Attach(selection.range);
+        }
+        if (!anchor) return;
+        ReadFromEdge(ec, anchor.Get(), true, kSurroundingBefore, before);
+        ReadFromEdge(ec, anchor.Get(), false, kSurroundingAfter, after);
+    }
+
+    void ReadFromEdge(TfEditCookie ec, ITfRange* anchor, bool before,
+                      ULONG count, std::wstring* out) {
+        ComPtr<ITfRange> edge;
+        const HRESULT found =
+            before ? context_->GetStart(ec, edge.GetAddressOf())
+                   : context_->GetEnd(ec, edge.GetAddressOf());
+        if (FAILED(found) || !edge) return;
+        const HRESULT pinned =
+            before ? edge->ShiftEndToRange(ec, anchor, TF_ANCHOR_START)
+                   : edge->ShiftStartToRange(ec, anchor, TF_ANCHOR_END);
+        if (FAILED(pinned)) return;
+        const LONG request =
+            before ? -static_cast<LONG>(count) : static_cast<LONG>(count);
+        LONG shifted = 0;
+        const HRESULT moved =
+            before ? edge->ShiftStart(ec, request, &shifted, nullptr)
+                   : edge->ShiftEnd(ec, request, &shifted, nullptr);
+        if (FAILED(moved)) return;
+        std::wstring text(count, L'\0');
+        ULONG got = 0;
+        if (FAILED(edge->GetText(ec, 0, text.data(), count, &got))) return;
+        text.resize(got);
+        *out = std::move(text);
+    }
+
     void StartSession() {
         if (!engine_ready_ || !context_ || session_) return;
         app_ = ProcessImageName();
@@ -864,6 +915,8 @@ private:
         composition_.Reset();
         composition_range_.Reset();
         composition_text_.clear();
+        context_before_.clear();
+        context_after_.clear();
         context_.Reset();
         document_.Reset();
     }
@@ -934,6 +987,10 @@ private:
                 composition_.Reset();
                 return;
             }
+            // Read the text around the caret now, while the composition is
+            // still empty. It is reported after the commit with the committed
+            // word appended.
+            ReadSurrounding(ec, &context_before_, &context_after_);
         }
         if (composition_range_) {
             const HRESULT set = composition_range_->SetText(
@@ -1007,6 +1064,9 @@ private:
                 context_->SetSelection(ec, 1, &selection);
             }
         } else if (context_ && !text.empty()) {
+            // No composition to anchor the read: the selection is the app's
+            // caret here, so the surrounding text can be read directly.
+            ReadSurrounding(ec, &context_before_, &context_after_);
             // RichEdit rejects a null output range even with TF_IAS_NOQUERY,
             // so ask for the range; it also leaves the selection where it was,
             // which would put the next character before this one.
@@ -1130,6 +1190,14 @@ private:
             // would compose on top of it ("zhongguo" + "a"). Reset so the
             // engine state matches the editor.
             if (session_) IpcClient::Instance().Reset(session_);
+            // The predict plugins want the text around the caret, including
+            // the word that just landed. The prefix was read when the
+            // composition began, before its range could clamp the read.
+            if (applied && session_ && chinese_ && !commit_text.empty()) {
+                IpcClient::Instance().Surrounding(
+                    session_, ToUtf8(context_before_ + commit_text),
+                    ToUtf8(context_after_));
+            }
             return applied;
         }
         if (show) candidates_up_ = have_items;
@@ -1280,6 +1348,10 @@ private:
     ComPtr<ITfContext> context_;
     ComPtr<ITfComposition> composition_;
     ComPtr<ITfRange> composition_range_;
+    // Text around the caret, read when the composition begins. Reported after
+    // the commit so the predict plugins see the word that just landed.
+    std::wstring context_before_;
+    std::wstring context_after_;
     TfGuidAtom attr_atom_ = 0;
     std::wstring composition_text_;
     bool ending_composition_ = false;

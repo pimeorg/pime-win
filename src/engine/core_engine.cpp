@@ -630,6 +630,59 @@ KeyResult CoreEngine::Select(SessionId id, uint32_t index) {
     return result;
 }
 
+KeyResult CoreEngine::Surrounding(SessionId id, const std::string& before,
+                                  const std::string& after) {
+    KeyResult result;
+    if (!impl_ || !impl_->ready) return result;
+    impl_->Run([&] {
+        Session* session = impl_->Find(id);
+        if (!session) return;
+        pime_text before_text{};
+        before_text.size = sizeof(before_text);
+        before_text.version = PIME_ABI_MAJOR;
+        before_text.text = before.empty() ? nullptr : before.data();
+        before_text.text_len = static_cast<uint32_t>(before.size());
+        pime_text after_text{};
+        after_text.size = sizeof(after_text);
+        after_text.version = PIME_ABI_MAJOR;
+        after_text.text = after.empty() ? nullptr : after.data();
+        after_text.text_len = static_cast<uint32_t>(after.size());
+
+        impl_->capture.clear();
+        impl_->capturing = true;
+        const pime_status status =
+            pime_core_surrounding(session->session, &before_text, &after_text);
+        pime_core_pump(impl_->core);
+        impl_->capturing = false;
+
+        result.commands = std::move(impl_->capture);
+        impl_->capture.clear();
+        if (status != PIME_OK) {
+            WriteLog(LogLevel::Warn, "surrounding",
+                     std::string("pime_core_surrounding: ") + pime_status_string(status));
+            return;
+        }
+        // A surrounding refresh only describes the caret's left context, so a
+        // strip that survives it would be stale (the text it was predicted
+        // from is gone). Predict plugins that have nothing to offer emit no
+        // command at all, so drop the strip here instead.
+        bool strip_command = false;
+        for (const UiCommand& command : result.commands) {
+            if (command.kind == UiKind::Candidates ||
+                command.kind == UiKind::HideCandidates) {
+                strip_command = true;
+                break;
+            }
+        }
+        if (!strip_command) {
+            UiCommand hide;
+            hide.kind = UiKind::HideCandidates;
+            result.commands.push_back(std::move(hide));
+        }
+    });
+    return result;
+}
+
 void CoreEngine::Focus(SessionId id, bool focused) {
     if (!impl_ || !impl_->ready) return;
     impl_->Run([&] {

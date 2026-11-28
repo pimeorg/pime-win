@@ -51,6 +51,10 @@ public:
     void Reset(SessionId session);
     void UpdateContext(SessionId session, const std::wstring& app,
                        uint32_t field_type, uint32_t host_caps);
+    // Reports the text around the caret so the predict plugins can suggest
+    // continuations. Fire-and-forget: the engine draws the resulting strip.
+    void Surrounding(SessionId session, const std::string& before,
+                     const std::string& after);
     bool TakeAsync(SessionId session, std::vector<UiCommand>* out);
     // A mode the engine switched on its own (chip click); cleared on read.
     bool TakeModeChange(SessionId session, bool* chinese);

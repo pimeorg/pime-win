@@ -408,6 +408,14 @@ void IpcClient::UpdateContext(SessionId session, const std::wstring& app,
     Send(MsgKind::UpdateContext, session, 0, writer.data());
 }
 
+void IpcClient::Surrounding(SessionId session, const std::string& before,
+                            const std::string& after) {
+    ByteWriter writer;
+    writer.Str(before);
+    writer.Str(after);
+    Send(MsgKind::Surrounding, session, 0, writer.data());
+}
+
 bool IpcClient::RefreshSettings() {
     ByteWriter writer;
     writer.Str(std::string());

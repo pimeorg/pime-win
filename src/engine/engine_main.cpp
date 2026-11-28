@@ -501,6 +501,19 @@ void HandleMessage(Client* client, const Message& request) {
                                                  host_caps);
             return;
         }
+        case MsgKind::Surrounding: {
+            // The shell reports the text around the caret after an edit. It is
+            // a push, not a request: whatever the predict plugins emit drives
+            // the strip here.
+            std::string before, after;
+            if (!reader.Str(&before) || !reader.Str(&after)) return;
+            const KeyResult result =
+                CoreEngine::Instance().Surrounding(request.session, before, after);
+            PushHostCommands(request.session,
+                             ApplyCommands(request.session, result.commands));
+            PostUi([session = request.session] { Render(session); });
+            return;
+        }
         case MsgKind::ReloadSettings: {
             // An empty chain means "just re-read the settings"; a named chain
             // also switches. Either way the reply carries fresh settings,
